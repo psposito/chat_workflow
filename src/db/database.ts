@@ -21,6 +21,7 @@ export function initDb(): Database.Database {
       due_time    TEXT,
       status      TEXT    NOT NULL DEFAULT 'pending'
                           CHECK(status IN ('pending', 'done')),
+      notified    INTEGER NOT NULL DEFAULT 0,
       created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -32,6 +33,13 @@ export function initDb(): Database.Database {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
   `);
+
+  // Migration: add notified column if it doesn't exist yet
+  try {
+    db.exec('ALTER TABLE tasks ADD COLUMN notified INTEGER NOT NULL DEFAULT 0');
+  } catch {
+    // Column already exists — ignore
+  }
 
   console.log('[db] Database initialised at', DB_PATH);
   return db;
@@ -80,6 +88,19 @@ export function listPendingTasks(phone: string): Task[] {
        ORDER BY due_date ASC, due_time ASC, created_at ASC`,
     )
     .all(phone) as Task[];
+}
+
+export function getTasksDueNow(date: string, time: string): Task[] {
+  return getDb()
+    .prepare(
+      `SELECT * FROM tasks
+       WHERE due_date = ? AND due_time = ? AND status = 'pending' AND notified = 0`,
+    )
+    .all(date, time) as Task[];
+}
+
+export function markTaskNotified(id: number): void {
+  getDb().prepare(`UPDATE tasks SET notified = 1 WHERE id = ?`).run(id);
 }
 
 export function listTasksDueToday(): Map<string, Task[]> {
