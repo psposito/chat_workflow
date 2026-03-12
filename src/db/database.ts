@@ -82,6 +82,25 @@ export function listPendingTasks(phone: string): Task[] {
     .all(phone) as Task[];
 }
 
+export function listTasksDueToday(): Map<string, Task[]> {
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }); // YYYY-MM-DD
+  const rows = getDb()
+    .prepare(
+      `SELECT * FROM tasks
+       WHERE due_date = ? AND status = 'pending'
+       ORDER BY due_time ASC, created_at ASC`,
+    )
+    .all(today) as Task[];
+
+  const byPhone = new Map<string, Task[]>();
+  for (const task of rows) {
+    const list = byPhone.get(task.phone) ?? [];
+    list.push(task);
+    byPhone.set(task.phone, list);
+  }
+  return byPhone;
+}
+
 // ---------------------------------------------------------------------------
 // Conversation memory
 // ---------------------------------------------------------------------------

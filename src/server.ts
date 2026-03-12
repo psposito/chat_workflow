@@ -2,6 +2,7 @@ import 'dotenv/config';
 import express, { Request, Response } from 'express';
 import { initDb } from './db/database';
 import { router } from './router';
+import { startJobs } from './schedulers/jobs';
 
 const app = express();
 
@@ -54,6 +55,7 @@ app.post('/webhook', async (req: Request, res: Response) => {
 
 export function startServer(port: number | string = process.env.PORT ?? 3000): void {
   initDb();
+  startJobs();
   app.listen(port, () => {
     console.log(`[server] Listening on port ${port}`);
   });
