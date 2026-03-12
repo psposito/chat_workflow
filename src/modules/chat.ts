@@ -6,7 +6,11 @@ const SYSTEM_PROMPT =
 
 const MEMORY_LIMIT = 10;
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+let openai: OpenAI;
+function getOpenAI(): OpenAI {
+  if (!openai) openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  return openai;
+}
 
 export async function chat(phone: string, message: string): Promise<string> {
   // 1. Persist the incoming user message
@@ -23,7 +27,7 @@ export async function chat(phone: string, message: string): Promise<string> {
   ];
 
   // 3. Call GPT-4o-mini
-  const completion = await openai.chat.completions.create({
+  const completion = await getOpenAI().chat.completions.create({
     model: 'gpt-4o-mini',
     messages,
   });

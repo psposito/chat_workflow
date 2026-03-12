@@ -1,7 +1,11 @@
 import OpenAI from 'openai';
 import { saveTask, listPendingTasks, Task } from '../db/database';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+let openai: OpenAI;
+function getOpenAI(): OpenAI {
+  if (!openai) openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  return openai;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -24,7 +28,7 @@ export async function extractAndSaveTask(
   phone: string,
   message: string,
 ): Promise<string> {
-  const completion = await openai.chat.completions.create({
+  const completion = await getOpenAI().chat.completions.create({
     model: 'gpt-4o-mini',
     response_format: { type: 'json_object' },
     messages: [
