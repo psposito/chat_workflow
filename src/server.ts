@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express, { Request, Response } from 'express';
 import { initDb } from './db/database';
 import { router } from './router';
-import { startJobs, triggerSeoDigest, triggerDueTimeAlerts } from './schedulers/jobs';
+import { startJobs, triggerSeoDigest, triggerDueTimeAlerts, triggerGmailPoll } from './schedulers/jobs';
 import { sendWhatsApp } from './twilio';
 
 const TWIML_MAX = 1500;
@@ -107,6 +107,19 @@ app.post('/trigger-alerts', async (_req: Request, res: Response) => {
   try {
     await triggerDueTimeAlerts();
     res.json({ status: 'ok', message: 'Due-time alerts checked and sent' });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /trigger-gmail — manually fire Gmail poll (for testing)
+// ---------------------------------------------------------------------------
+
+app.post('/trigger-gmail', async (_req: Request, res: Response) => {
+  try {
+    await triggerGmailPoll();
+    res.json({ status: 'ok', message: 'Gmail poll completed' });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }

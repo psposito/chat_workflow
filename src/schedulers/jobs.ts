@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import { listTasksDueToday, getTasksDueNow, markTaskNotified } from '../db/database';
 import { listTasks } from '../modules/tasks';
 import { runSeoRadar } from '../modules/seoRadar';
+import { fetchNewImportantEmails, formatEmailsForWhatsApp } from '../modules/gmail';
 import { sendWhatsApp } from '../twilio';
 
 const TZ = 'America/Sao_Paulo';
@@ -116,8 +117,49 @@ async function runDueTimeAlerts(): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Job 4 — Gmail important email polling (every 5 minutes)
+// ---------------------------------------------------------------------------
+
+async function runGmailPoll(): Promise<void> {
+  console.log('[jobs] Polling Gmail for important emails…');
+
+  const phones = getNotifyPhones();
+  if (phones.length === 0) {
+    console.warn('[jobs] NOTIFY_PHONES is empty — skipping Gmail poll.');
+    return;
+  }
+
+  let emails;
+  try {
+    emails = await fetchNewImportantEmails();
+  } catch (err) {
+    console.error('[jobs] Gmail poll error:', (err as Error).message);
+    return;
+  }
+
+  if (emails.length === 0) {
+    console.log('[jobs] No new important emails.');
+    return;
+  }
+
+  const message = formatEmailsForWhatsApp(emails);
+  for (const phone of phones) {
+    try {
+      await sendWhatsApp(phone.replace('whatsapp:', ''), message);
+      console.log(`[jobs] Gmail notification sent to ${phone}`);
+    } catch (err) {
+      console.error(`[jobs] Failed to send Gmail notification to ${phone}:`, (err as Error).message);
+    }
+  }
+}
+
 export async function triggerSeoDigest(): Promise<void> {
   return runWeeklySeoDigest();
+}
+
+export async function triggerGmailPoll(): Promise<void> {
+  return runGmailPoll();
 }
 
 export async function triggerDueTimeAlerts(): Promise<void> {
@@ -136,4 +178,12 @@ export function startJobs(): void {
   // Per-minute due-time alerts
   cron.schedule('* * * * *', runDueTimeAlerts, { timezone: TZ });
   console.log('[jobs] Due-time alerts scheduled — every minute');
+
+  // Gmail polling — every 5 minutes (only if credentials are set)
+  if (process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD) {
+    cron.schedule('*/5 * * * *', runGmailPoll, { timezone: TZ });
+    console.log('[jobs] Gmail polling scheduled — every 5 minutes');
+  } else {
+    console.log('[jobs] Gmail polling disabled — set GMAIL_USER and GMAIL_APP_PASSWORD to enable');
+  }
 }

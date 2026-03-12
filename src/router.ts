@@ -1,6 +1,7 @@
 import { chat } from './modules/chat';
 import { extractAndSaveTask, listTasks, removeTask, removeAllTasks } from './modules/tasks';
 import { runSeoRadar } from './modules/seoRadar';
+import { fetchNewImportantEmails, formatEmailsForWhatsApp } from './modules/gmail';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -27,6 +28,9 @@ function buildHelpText(): string {
     '  • _lembrete: reunião amanhã às 14h_ — salva uma tarefa',
     '  • _excluir tarefa 2_ — exclui a tarefa pelo número',
     '  • _excluir todas as tarefas_ — apaga todas as tarefas pendentes',
+    '',
+    '📧 *Gmail*',
+    '  • _meus emails_ — verifica e-mails importantes não lidos',
     '',
     '📡 *SEO*',
     '  • _seo_, _novidades_ ou _radar_ — digest de notícias de SEO',
@@ -73,6 +77,12 @@ export async function router(phone: string, message: string): Promise<string> {
   // Date / time
   if (matchesAny(n, ['que horas', 'que dia', 'data', 'hora', 'horario'])) {
     return buildDateTimeText();
+  }
+
+  // Gmail check on demand
+  if (matchesAny(n, ['meus emails', 'meu email', 'checar email', 'verificar email', 'emails novos', 'novos emails'])) {
+    const emails = await fetchNewImportantEmails();
+    return formatEmailsForWhatsApp(emails);
   }
 
   // SEO radar

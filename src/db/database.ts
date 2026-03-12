@@ -32,6 +32,11 @@ export function initDb(): Database.Database {
       content    TEXT NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    CREATE TABLE IF NOT EXISTS gmail_notified (
+      message_id  TEXT PRIMARY KEY,
+      notified_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   // Migration: add notified column if it doesn't exist yet
@@ -135,6 +140,23 @@ export function listTasksDueToday(): Map<string, Task[]> {
     byPhone.set(task.phone, list);
   }
   return byPhone;
+}
+
+// ---------------------------------------------------------------------------
+// Gmail notifications
+// ---------------------------------------------------------------------------
+
+export function isEmailNotified(messageId: string): boolean {
+  const row = getDb()
+    .prepare(`SELECT 1 FROM gmail_notified WHERE message_id = ?`)
+    .get(messageId);
+  return !!row;
+}
+
+export function markEmailNotified(messageId: string): void {
+  getDb()
+    .prepare(`INSERT OR IGNORE INTO gmail_notified (message_id) VALUES (?)`)
+    .run(messageId);
 }
 
 // ---------------------------------------------------------------------------
