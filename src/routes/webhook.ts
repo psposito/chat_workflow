@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
-import { getDb } from '../db';
 import { sendWhatsApp } from '../twilio';
+import { router } from '../router';
 
 export const webhookRouter = Router();
 
@@ -14,20 +14,15 @@ webhookRouter.post('/', async (req: Request, res: Response) => {
     return;
   }
 
-  const db = getDb();
-  db.prepare(
-    'INSERT INTO messages (from_num, body, direction) VALUES (?, ?, ?)',
-  ).run(from, body, 'inbound');
-
   console.log(`[webhook] Received from ${from}: ${body}`);
 
-  // Echo the message back as a simple demo
-  const replyText = `You said: ${body}`;
-  await sendWhatsApp(from.replace('whatsapp:', ''), replyText);
-
-  db.prepare(
-    'INSERT INTO messages (from_num, body, direction) VALUES (?, ?, ?)',
-  ).run(from, replyText, 'outbound');
+  try {
+    const reply = await router(from, body);
+    await sendWhatsApp(from.replace('whatsapp:', ''), reply);
+    console.log(`[webhook] Replied to ${from}: ${reply.slice(0, 80)}...`);
+  } catch (err) {
+    console.error('[webhook] Error processing message:', err);
+  }
 
   res.status(200).send('<Response></Response>');
 });
