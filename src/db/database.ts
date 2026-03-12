@@ -104,6 +104,20 @@ export function markTaskNotified(id: number): void {
   getDb().prepare(`UPDATE tasks SET notified = 1 WHERE id = ?`).run(id);
 }
 
+export function deleteTask(phone: string, id: number): boolean {
+  const result = getDb()
+    .prepare(`DELETE FROM tasks WHERE id = ? AND phone = ?`)
+    .run(id, phone);
+  return result.changes > 0;
+}
+
+export function deleteAllTasks(phone: string): number {
+  const result = getDb()
+    .prepare(`DELETE FROM tasks WHERE phone = ? AND status = 'pending'`)
+    .run(phone);
+  return result.changes as number;
+}
+
 export function listTasksDueToday(): Map<string, Task[]> {
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }); // YYYY-MM-DD
   const rows = getDb()

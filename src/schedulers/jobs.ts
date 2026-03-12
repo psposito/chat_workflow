@@ -120,6 +120,10 @@ export async function triggerSeoDigest(): Promise<void> {
   return runWeeklySeoDigest();
 }
 
+export async function triggerDueTimeAlerts(): Promise<void> {
+  return runDueTimeAlerts();
+}
+
 export function startJobs(): void {
   // Daily reminder — 08:00 BRT every day
   cron.schedule('0 8 * * *', runDailyReminder, { timezone: TZ });

@@ -1,5 +1,5 @@
 import { chat } from './modules/chat';
-import { extractAndSaveTask, listTasks } from './modules/tasks';
+import { extractAndSaveTask, listTasks, removeTask, removeAllTasks } from './modules/tasks';
 import { runSeoRadar } from './modules/seoRadar';
 
 // ---------------------------------------------------------------------------
@@ -25,6 +25,8 @@ function buildHelpText(): string {
     '📋 *Tarefas*',
     '  • _minhas tarefas_ — lista suas tarefas pendentes',
     '  • _lembrete: reunião amanhã às 14h_ — salva uma tarefa',
+    '  • _excluir tarefa 2_ — exclui a tarefa pelo número',
+    '  • _excluir todas as tarefas_ — apaga todas as tarefas pendentes',
     '',
     '📡 *SEO*',
     '  • _seo_, _novidades_ ou _radar_ — digest de notícias de SEO',
@@ -81,6 +83,19 @@ export async function router(phone: string, message: string): Promise<string> {
   // List tasks
   if (matchesAny(n, ['minhas tarefas', 'listar tarefas', 'ver tarefas', 'lista de tarefas'])) {
     return listTasks(phone);
+  }
+
+  // Delete all tasks
+  if (
+    matchesAny(n, ['excluir todas', 'apagar todas', 'deletar todas', 'limpar tarefas', 'remover todas'])
+  ) {
+    return removeAllTasks(phone);
+  }
+
+  // Delete specific task — "excluir tarefa 2", "apagar tarefa 3", etc.
+  const deleteMatch = n.match(/(?:excluir|apagar|deletar|remover)\s+(?:tarefa\s+)?#?(\d+)/);
+  if (deleteMatch) {
+    return removeTask(phone, parseInt(deleteMatch[1], 10));
   }
 
   // Save task — triggered by task-related keywords or time patterns (e.g. "14h", "14:00")

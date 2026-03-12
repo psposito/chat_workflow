@@ -1,5 +1,5 @@
 import OpenAI from 'openai';
-import { saveTask, listPendingTasks, Task } from '../db/database';
+import { saveTask, listPendingTasks, deleteTask, deleteAllTasks, Task } from '../db/database';
 
 let openai: OpenAI;
 function getOpenAI(): OpenAI {
@@ -82,6 +82,22 @@ function buildConfirmation(task: Task): string {
 
   lines.push(`\nUse *listar tarefas* para ver seus lembretes.`);
   return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// removeTask / removeAllTasks
+// ---------------------------------------------------------------------------
+
+export function removeTask(phone: string, id: number): string {
+  const removed = deleteTask(phone, id);
+  if (removed) return `✅ Tarefa #${id} excluída com sucesso.`;
+  return `⚠️ Tarefa #${id} não encontrada ou não pertence a você.`;
+}
+
+export function removeAllTasks(phone: string): string {
+  const count = deleteAllTasks(phone);
+  if (count === 0) return '📭 Você não tem tarefas pendentes para excluir.';
+  return `🗑️ ${count} tarefa(s) excluída(s) com sucesso.`;
 }
 
 // ---------------------------------------------------------------------------
