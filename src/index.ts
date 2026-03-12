@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import cron from 'node-cron';
-import { initDb } from './db';
+import { initDb } from './db/database';
 import { webhookRouter } from './routes/webhook';
 
 const app = express();
