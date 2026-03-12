@@ -22,8 +22,6 @@ RUN npm ci --omit=dev && npm cache clean --force
 # Copy compiled output
 COPY --from=builder /app/dist ./dist
 
-# Persistent volume for SQLite
-VOLUME ["/data"]
 ENV NODE_ENV=production
 
 EXPOSE 3000
