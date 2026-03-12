@@ -77,6 +77,10 @@ async function runWeeklySeoDigest(): Promise<void> {
 // Register jobs
 // ---------------------------------------------------------------------------
 
+export async function triggerSeoDigest(): Promise<void> {
+  return runWeeklySeoDigest();
+}
+
 export function startJobs(): void {
   // Daily reminder — 08:00 BRT every day
   cron.schedule('0 8 * * *', runDailyReminder, { timezone: TZ });

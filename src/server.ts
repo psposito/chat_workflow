@@ -2,7 +2,7 @@ import 'dotenv/config';
 import express, { Request, Response } from 'express';
 import { initDb } from './db/database';
 import { router } from './router';
-import { startJobs } from './schedulers/jobs';
+import { startJobs, triggerSeoDigest } from './schedulers/jobs';
 
 const app = express();
 
@@ -47,6 +47,19 @@ app.post('/webhook', async (req: Request, res: Response) => {
   res.status(200).send(
     `<Response><Message>${reply.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</Message></Response>`,
   );
+});
+
+// ---------------------------------------------------------------------------
+// POST /trigger-seo — manually fire SEO digest (for testing)
+// ---------------------------------------------------------------------------
+
+app.post('/trigger-seo', async (_req: Request, res: Response) => {
+  try {
+    await triggerSeoDigest();
+    res.json({ status: 'ok', message: 'SEO digest sent' });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
 });
 
 // ---------------------------------------------------------------------------
