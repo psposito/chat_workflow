@@ -84,11 +84,14 @@ async function runWeeklySeoDigest(): Promise<void> {
 async function runDueTimeAlerts(): Promise<void> {
   const now = new Date();
   const date = now.toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }); // YYYY-MM-DD
-  const time = now.toLocaleTimeString('pt-BR', {
+
+  // Use en-GB + hour12:false to guarantee "HH:MM" — pt-BR can produce "14h30" on some Node versions
+  const time = new Intl.DateTimeFormat('en-GB', {
     hour: '2-digit',
     minute: '2-digit',
+    hour12: false,
     timeZone: 'America/Sao_Paulo',
-  }); // HH:MM
+  }).format(now); // HH:MM
 
   const tasks = getTasksDueNow(date, time);
   if (tasks.length === 0) return;

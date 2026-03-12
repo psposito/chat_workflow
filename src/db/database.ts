@@ -62,6 +62,7 @@ export interface Task {
   due_date: string | null;
   due_time: string | null;
   status: 'pending' | 'done';
+  notified: 0 | 1;
   created_at: string;
 }
 
