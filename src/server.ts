@@ -63,6 +63,25 @@ app.post('/trigger-seo', async (_req: Request, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /test-send — send a test message directly to NOTIFY_PHONES
+// ---------------------------------------------------------------------------
+
+app.post('/test-send', async (_req: Request, res: Response) => {
+  const { sendWhatsApp } = await import('./twilio');
+  const phones = (process.env.NOTIFY_PHONES ?? '').split(',').map((p) => p.trim()).filter(Boolean);
+  const results: Record<string, string> = {};
+  for (const phone of phones) {
+    try {
+      await sendWhatsApp(phone.replace('whatsapp:', ''), '✅ Teste de envio direto — bot funcionando!');
+      results[phone] = 'ok';
+    } catch (err) {
+      results[phone] = (err as Error).message;
+    }
+  }
+  res.json(results);
+});
+
+// ---------------------------------------------------------------------------
 // Bootstrap
 // ---------------------------------------------------------------------------
 
