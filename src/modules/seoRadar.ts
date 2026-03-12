@@ -109,21 +109,18 @@ function deduplicate(items: DigestItem[]): DigestItem[] {
 // ---------------------------------------------------------------------------
 
 export async function runSeoRadar(): Promise<string> {
-  const [sel, seroundtable, searchConsoleCommunity, searchEngineLand] =
+  const [sel, semrush, neilpatel, searchEngineLand] =
     await Promise.allSettled([
-      fetchRssFeed('https://feeds.feedburner.com/SearchEngineLand', 'Search Engine Land (RSS)'),
-      fetchRssFeed('https://www.seroundtable.com/feed', 'SE Roundtable'),
-      fetchRssFeed(
-        'https://support.google.com/webmasters/threads/feed?hl=pt-BR',
-        'Search Console Community',
-      ),
+      fetchRssFeed('https://feeds.feedburner.com/SearchEngineLand', 'Search Engine Land'),
+      fetchRssFeed('https://www.semrush.com/blog/feed/', 'Semrush Blog'),
+      fetchRssFeed('https://neilpatel.com/blog/feed/', 'Neil Patel'),
       fetchSearchEngineLand(),
     ]);
 
   const all: DigestItem[] = [
     ...(sel.status === 'fulfilled' ? sel.value : []),
-    ...(seroundtable.status === 'fulfilled' ? seroundtable.value : []),
-    ...(searchConsoleCommunity.status === 'fulfilled' ? searchConsoleCommunity.value : []),
+    ...(semrush.status === 'fulfilled' ? semrush.value : []),
+    ...(neilpatel.status === 'fulfilled' ? neilpatel.value : []),
     ...(searchEngineLand.status === 'fulfilled' ? searchEngineLand.value : []),
   ];
 
