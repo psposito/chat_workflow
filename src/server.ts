@@ -3,6 +3,31 @@ import express, { Request, Response } from 'express';
 import { initDb } from './db/database';
 import { router } from './router';
 import { startJobs, triggerSeoDigest } from './schedulers/jobs';
+import { sendWhatsApp } from './twilio';
+
+const TWIML_MAX = 1500;
+
+function escapeXml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function splitMessage(body: string): string[] {
+  if (body.length <= TWIML_MAX) return [body];
+  const chunks: string[] = [];
+  const lines = body.split('\n');
+  let current = '';
+  for (const line of lines) {
+    const candidate = current ? `${current}\n${line}` : line;
+    if (candidate.length > TWIML_MAX) {
+      if (current) chunks.push(current);
+      current = line;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
 
 const app = express();
 
@@ -42,11 +67,23 @@ app.post('/webhook', async (req: Request, res: Response) => {
 
   console.log(`[webhook] → ${from}: ${reply.slice(0, 100)}${reply.length > 100 ? '…' : ''}`);
 
-  // Respond with TwiML so Twilio delivers the reply immediately
-  res.setHeader('Content-Type', 'text/xml');
-  res.status(200).send(
-    `<Response><Message>${reply.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</Message></Response>`,
-  );
+  const chunks = splitMessage(reply);
+
+  if (chunks.length === 1) {
+    // Single message — reply via TwiML (faster, no extra API call)
+    res.setHeader('Content-Type', 'text/xml');
+    res.status(200).send(`<Response><Message>${escapeXml(chunks[0])}</Message></Response>`);
+  } else {
+    // Multiple chunks — send via REST API and return empty TwiML
+    res.setHeader('Content-Type', 'text/xml');
+    res.status(200).send('<Response></Response>');
+    const to = from.replace('whatsapp:', '');
+    for (const chunk of chunks) {
+      await sendWhatsApp(to, chunk).catch((err) =>
+        console.error('[webhook] Failed to send chunk:', err),
+      );
+    }
+  }
 });
 
 // ---------------------------------------------------------------------------
