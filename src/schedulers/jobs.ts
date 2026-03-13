@@ -197,10 +197,10 @@ export async function triggerGmailPoll(): Promise<GmailPollResult> {
     return { phones, emailsScanned: 0, emailsImportant: 0, emailsSent: 0, errors: [(err as Error).message] };
   }
 
-  const { emails, scanned } = fetchResult;
+  const { emails, scanned, accountErrors } = fetchResult;
 
   if (emails.length === 0) {
-    return { phones, emailsScanned: scanned, emailsImportant: 0, emailsSent: 0, errors: [] };
+    return { phones, emailsScanned: scanned, emailsImportant: 0, emailsSent: 0, errors: accountErrors };
   }
 
   const message = formatEmailsForWhatsApp(emails);
@@ -215,6 +215,7 @@ export async function triggerGmailPoll(): Promise<GmailPollResult> {
     }
   }
 
+  errors.push(...accountErrors);
   return { phones, emailsScanned: scanned, emailsImportant: emails.length, emailsSent, errors };
 }
 

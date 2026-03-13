@@ -152,16 +152,18 @@ export interface EmailToNotify {
 export interface FetchResult {
   emails: EmailToNotify[];
   scanned: number;
+  accountErrors: string[];
 }
 
 export async function fetchAndScoreEmails(): Promise<FetchResult> {
   const accounts = getEnabledGoogleAccounts();
   if (accounts.length === 0) {
     console.warn('[gmail] No Google accounts linked — skipping.');
-    return { emails: [], scanned: 0 };
+    return { emails: [], scanned: 0, accountErrors: [] };
   }
 
   const results: EmailToNotify[] = [];
+  const accountErrors: string[] = [];
   let scanned = 0;
 
   for (const account of accounts) {
@@ -177,11 +179,9 @@ export async function fetchAndScoreEmails(): Promise<FetchResult> {
       });
       messageIds = (listRes.data.messages ?? []).map((m) => m.id!).filter(Boolean);
     } catch (err: any) {
-      if (err?.status === 401 || err?.status === 403) {
-        console.warn(`[gmail] Account ${account.email} lacks Gmail scope or token revoked — skipping.`);
-      } else {
-        console.error(`[gmail] Failed to list messages for ${account.email}:`, (err as Error).message);
-      }
+      const msg = `[gmail] Account ${account.email}: ${(err as Error).message} (status=${err?.status ?? err?.code ?? 'unknown'})`;
+      console.error(msg);
+      accountErrors.push(msg);
       continue;
     }
 
@@ -259,7 +259,7 @@ export async function fetchAndScoreEmails(): Promise<FetchResult> {
     }
   }
 
-  return { emails: results, scanned };
+  return { emails: results, scanned, accountErrors };
 }
 
 // ---------------------------------------------------------------------------
