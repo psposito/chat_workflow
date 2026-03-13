@@ -37,6 +37,9 @@ function getImapClient(): ImapFlow {
       pass: process.env.GMAIL_APP_PASSWORD!,
     },
     logger: false,
+    connectionTimeout: 10000,
+    greetTimeout: 10000,
+    socketTimeout: 15000,
   });
 }
 
