@@ -193,13 +193,9 @@ export function startJobs(): void {
   cron.schedule('* * * * *', runDueTimeAlerts, { timezone: TZ });
   console.log('[jobs] Due-time alerts scheduled — every minute');
 
-  // Gmail polling — every 5 minutes (only if credentials are set)
-  if (process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD) {
-    cron.schedule('*/5 * * * *', runGmailPoll, { timezone: TZ });
-    console.log('[jobs] Gmail polling scheduled — every 5 minutes');
-  } else {
-    console.log('[jobs] Gmail polling disabled — set GMAIL_USER and GMAIL_APP_PASSWORD to enable');
-  }
+  // Gmail polling — every 5 minutes (credentials checked at poll time)
+  cron.schedule('*/5 * * * *', runGmailPoll, { timezone: TZ });
+  console.log('[jobs] Gmail polling scheduled — every 5 minutes');
 
   // Google Calendar reminders — every minute (only if accounts are linked)
   if (getEnabledGoogleAccounts().length > 0) {
