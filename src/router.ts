@@ -118,7 +118,7 @@ export async function router(phone: string, message: string): Promise<string> {
 
   // Gmail check on demand
   if (matchesAny(n, ['meus emails', 'meu email', 'checar email', 'verificar email', 'emails novos', 'novos emails'])) {
-    const emails = await fetchNewImportantEmails();
+    const { emails } = await fetchNewImportantEmails();
     if (emails.length > 0) persistNotificationBatch(phone, emails);
     return formatEmailsForWhatsApp(emails);
   }

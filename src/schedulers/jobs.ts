@@ -131,13 +131,15 @@ async function runGmailPoll(): Promise<void> {
     return;
   }
 
-  let emails;
+  let fetchResult;
   try {
-    emails = await fetchNewImportantEmails();
+    fetchResult = await fetchNewImportantEmails();
   } catch (err) {
     console.error('[jobs] Gmail poll error:', (err as Error).message);
     return;
   }
+
+  const { emails } = fetchResult;
 
   if (emails.length === 0) {
     console.log('[jobs] No new important emails.');
@@ -174,7 +176,8 @@ export async function triggerCalendarReminders(): Promise<void> {
 
 export interface GmailPollResult {
   phones: string[];
-  emailsFound: number;
+  emailsScanned: number;
+  emailsImportant: number;
   emailsSent: number;
   errors: string[];
 }
@@ -183,23 +186,21 @@ export async function triggerGmailPoll(): Promise<GmailPollResult> {
   const phones = getNotifyPhones();
   const errors: string[] = [];
 
-  if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
-    return { phones, emailsFound: 0, emailsSent: 0, errors: ['GMAIL_USER or GMAIL_APP_PASSWORD not set'] };
-  }
-
   if (phones.length === 0) {
-    return { phones, emailsFound: 0, emailsSent: 0, errors: ['NOTIFY_PHONES is empty'] };
+    return { phones, emailsScanned: 0, emailsImportant: 0, emailsSent: 0, errors: ['NOTIFY_PHONES is empty'] };
   }
 
-  let emails;
+  let fetchResult;
   try {
-    emails = await fetchNewImportantEmails();
+    fetchResult = await fetchNewImportantEmails();
   } catch (err) {
-    return { phones, emailsFound: 0, emailsSent: 0, errors: [(err as Error).message] };
+    return { phones, emailsScanned: 0, emailsImportant: 0, emailsSent: 0, errors: [(err as Error).message] };
   }
+
+  const { emails, scanned } = fetchResult;
 
   if (emails.length === 0) {
-    return { phones, emailsFound: 0, emailsSent: 0, errors: [] };
+    return { phones, emailsScanned: scanned, emailsImportant: 0, emailsSent: 0, errors: [] };
   }
 
   const message = formatEmailsForWhatsApp(emails);
@@ -214,7 +215,7 @@ export async function triggerGmailPoll(): Promise<GmailPollResult> {
     }
   }
 
-  return { phones, emailsFound: emails.length, emailsSent, errors };
+  return { phones, emailsScanned: scanned, emailsImportant: emails.length, emailsSent, errors };
 }
 
 export async function triggerDueTimeAlerts(): Promise<void> {

@@ -149,14 +149,20 @@ export interface EmailToNotify {
   decisionSource: 'reputation' | 'ai';
 }
 
-export async function fetchAndScoreEmails(): Promise<EmailToNotify[]> {
+export interface FetchResult {
+  emails: EmailToNotify[];
+  scanned: number;
+}
+
+export async function fetchAndScoreEmails(): Promise<FetchResult> {
   const accounts = getEnabledGoogleAccounts();
   if (accounts.length === 0) {
     console.warn('[gmail] No Google accounts linked — skipping.');
-    return [];
+    return { emails: [], scanned: 0 };
   }
 
   const results: EmailToNotify[] = [];
+  let scanned = 0;
 
   for (const account of accounts) {
     const auth = buildOAuth2Client(account);
@@ -180,6 +186,7 @@ export async function fetchAndScoreEmails(): Promise<EmailToNotify[]> {
     }
 
     for (const msgId of messageIds) {
+      scanned++;
       if (isEmailNotified(msgId)) continue;
 
       let sender = 'unknown';
@@ -252,7 +259,7 @@ export async function fetchAndScoreEmails(): Promise<EmailToNotify[]> {
     }
   }
 
-  return results;
+  return { emails: results, scanned };
 }
 
 // ---------------------------------------------------------------------------
@@ -322,7 +329,7 @@ export function recordEmailFeedback(
 // and "meus emails" command
 // ---------------------------------------------------------------------------
 
-export async function fetchNewImportantEmails(): Promise<EmailToNotify[]> {
+export async function fetchNewImportantEmails(): Promise<FetchResult> {
   return fetchAndScoreEmails();
 }
 
