@@ -172,14 +172,9 @@ export async function fetchAndScoreEmails(): Promise<FetchResult> {
     const stateKey = `gmail_last_polled_${account.email}`;
     const lastPolledStr = getPollState(stateKey);
 
-    // First run for this account: record current time and skip existing emails
-    if (!lastPolledStr) {
-      setPollState(stateKey, String(Date.now()));
-      console.log(`[gmail] First run for ${account.email} — recording start time, skipping existing emails.`);
-      continue;
-    }
-
-    const afterSecs = Math.floor((parseInt(lastPolledStr, 10) - 120_000) / 1000); // 2 min overlap to avoid gaps
+    // On first run, look back 1 hour to catch recent emails without flooding old ones
+    const lastPolledMs = lastPolledStr ? parseInt(lastPolledStr, 10) : Date.now() - 60 * 60 * 1000;
+    const afterSecs = Math.floor((lastPolledMs - 120_000) / 1000); // 2 min overlap to avoid gaps
     setPollState(stateKey, String(Date.now()));
 
     const auth = buildOAuth2Client(account);
