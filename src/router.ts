@@ -7,6 +7,7 @@ import {
   persistNotificationBatch,
   recordEmailFeedback,
 } from './modules/gmail';
+import { listTodayEventsForPhone, createEventForPhone } from './modules/googleCalendar';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -33,6 +34,10 @@ function buildHelpText(): string {
     '  • _lembrete: reunião amanhã às 14h_ — salva uma tarefa',
     '  • _excluir tarefa 2_ — exclui a tarefa pelo número',
     '  • _excluir todas as tarefas_ — apaga todas as tarefas pendentes',
+    '',
+    '📅 *Agenda (Google Calendar)*',
+    '  • _minha agenda_ — ver eventos de hoje',
+    '  • _agendar reunião amanhã às 14h_ — criar evento no Google Agenda',
     '',
     '📧 *Gmail*',
     '  • _meus emails_ — verifica e-mails importantes não lidos',
@@ -84,6 +89,19 @@ export async function router(phone: string, message: string): Promise<string> {
   // Date / time
   if (matchesAny(n, ['que horas', 'que dia', 'data', 'hora', 'horario'])) {
     return buildDateTimeText();
+  }
+
+  // Calendar — list today's events
+  if (matchesAny(n, ['minha agenda', 'agenda hoje', 'eventos hoje', 'meus eventos', 'agenda do dia'])) {
+    return listTodayEventsForPhone(phone);
+  }
+
+  // Calendar — create event (keywords that clearly indicate a calendar event, not a task)
+  const hasCalendarKeyword = matchesAny(n, ['reuniao', 'evento', 'encontro', 'call', 'meeting', 'calendario', 'google agenda', 'google calendar']);
+  const hasScheduleKeyword = matchesAny(n, ['agendar', 'marcar', 'criar evento', 'novo evento']);
+  const hasTimePatternEarly = /\b\d{1,2}[h:]\d{0,2}\b/.test(n);
+  if (hasCalendarKeyword && (hasScheduleKeyword || hasTimePatternEarly)) {
+    return createEventForPhone(phone, message);
   }
 
   // Gmail feedback — "importante 2" / "não importante 1"

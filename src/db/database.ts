@@ -66,6 +66,28 @@ export function initDb(): Database.Database {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (phone, idx)
     );
+
+    -- Google OAuth2 tokens per linked account
+    CREATE TABLE IF NOT EXISTS google_accounts (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      email         TEXT    UNIQUE NOT NULL,
+      display_name  TEXT    NOT NULL DEFAULT '',
+      access_token  TEXT,
+      refresh_token TEXT    NOT NULL,
+      token_expiry  TEXT,
+      scopes        TEXT    NOT NULL DEFAULT '',
+      enabled       INTEGER NOT NULL DEFAULT 1,
+      created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Deduplication: one row per calendar event that has been notified
+    CREATE TABLE IF NOT EXISTS calendar_notified (
+      event_id    TEXT    NOT NULL,
+      account_id  INTEGER NOT NULL REFERENCES google_accounts(id),
+      notified_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (event_id, account_id)
+    );
   `);
 
   // Migration: add notified column if it doesn't exist yet
@@ -274,6 +296,92 @@ export function getEmailByBatchIndex(phone: string, idx: number): GmailEmail | n
     JOIN gmail_notification_batch b ON b.email_id = e.id
     WHERE b.phone = ? AND b.idx = ?
   `).get(phone, idx) as GmailEmail | null;
+}
+
+// ---------------------------------------------------------------------------
+// Google accounts
+// ---------------------------------------------------------------------------
+
+export interface GoogleAccount {
+  id: number;
+  email: string;
+  display_name: string;
+  access_token: string | null;
+  refresh_token: string;
+  token_expiry: string | null;
+  scopes: string;
+  enabled: 0 | 1;
+  created_at: string;
+  updated_at: string;
+}
+
+export function upsertGoogleAccount(
+  email: string,
+  displayName: string,
+  refreshToken: string,
+  accessToken: string | null,
+  tokenExpiry: string | null,
+  scopes: string,
+): GoogleAccount {
+  getDb().prepare(`
+    INSERT INTO google_accounts (email, display_name, refresh_token, access_token, token_expiry, scopes)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(email) DO UPDATE SET
+      display_name  = excluded.display_name,
+      refresh_token = COALESCE(excluded.refresh_token, refresh_token),
+      access_token  = excluded.access_token,
+      token_expiry  = excluded.token_expiry,
+      scopes        = excluded.scopes,
+      enabled       = 1,
+      updated_at    = CURRENT_TIMESTAMP
+  `).run(email, displayName, refreshToken, accessToken, tokenExpiry, scopes);
+  return getDb()
+    .prepare(`SELECT * FROM google_accounts WHERE email = ?`)
+    .get(email) as GoogleAccount;
+}
+
+export function updateGoogleAccountTokens(
+  id: number,
+  accessToken: string,
+  tokenExpiry: string,
+): void {
+  getDb().prepare(`
+    UPDATE google_accounts
+    SET access_token = ?, token_expiry = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(accessToken, tokenExpiry, id);
+}
+
+export function disableGoogleAccount(id: number): void {
+  getDb().prepare(`UPDATE google_accounts SET enabled = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`).run(id);
+}
+
+export function getEnabledGoogleAccounts(): GoogleAccount[] {
+  return getDb()
+    .prepare(`SELECT * FROM google_accounts WHERE enabled = 1 ORDER BY id ASC`)
+    .all() as GoogleAccount[];
+}
+
+export function getGoogleAccountByEmail(email: string): GoogleAccount | null {
+  return getDb()
+    .prepare(`SELECT * FROM google_accounts WHERE email = ?`)
+    .get(email) as GoogleAccount | null;
+}
+
+// ---------------------------------------------------------------------------
+// Calendar notification deduplication
+// ---------------------------------------------------------------------------
+
+export function isCalendarEventNotified(eventId: string, accountId: number): boolean {
+  return !!getDb()
+    .prepare(`SELECT 1 FROM calendar_notified WHERE event_id = ? AND account_id = ?`)
+    .get(eventId, accountId);
+}
+
+export function markCalendarEventNotified(eventId: string, accountId: number): void {
+  getDb()
+    .prepare(`INSERT OR IGNORE INTO calendar_notified (event_id, account_id) VALUES (?, ?)`)
+    .run(eventId, accountId);
 }
 
 // ---------------------------------------------------------------------------

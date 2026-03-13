@@ -1,8 +1,9 @@
 import cron from 'node-cron';
-import { listTasksDueToday, getTasksDueNow, markTaskNotified } from '../db/database';
+import { listTasksDueToday, getTasksDueNow, markTaskNotified, getEnabledGoogleAccounts } from '../db/database';
 import { listTasks } from '../modules/tasks';
 import { runSeoRadar } from '../modules/seoRadar';
 import { fetchNewImportantEmails, formatEmailsForWhatsApp, persistNotificationBatch } from '../modules/gmail';
+import { checkAndSendCalendarReminders } from '../modules/googleCalendar';
 import { sendWhatsApp } from '../twilio';
 
 const TZ = 'America/Sao_Paulo';
@@ -155,8 +156,20 @@ async function runGmailPoll(): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Job 5 — Google Calendar 15-min reminders (every minute)
+// ---------------------------------------------------------------------------
+
+async function runCalendarReminders(): Promise<void> {
+  await checkAndSendCalendarReminders(getNotifyPhones(), sendWhatsApp);
+}
+
 export async function triggerSeoDigest(): Promise<void> {
   return runWeeklySeoDigest();
+}
+
+export async function triggerCalendarReminders(): Promise<void> {
+  return runCalendarReminders();
 }
 
 export async function triggerGmailPoll(): Promise<void> {
@@ -186,5 +199,13 @@ export function startJobs(): void {
     console.log('[jobs] Gmail polling scheduled — every 5 minutes');
   } else {
     console.log('[jobs] Gmail polling disabled — set GMAIL_USER and GMAIL_APP_PASSWORD to enable');
+  }
+
+  // Google Calendar reminders — every minute (only if accounts are linked)
+  if (getEnabledGoogleAccounts().length > 0) {
+    cron.schedule('* * * * *', runCalendarReminders, { timezone: TZ });
+    console.log('[jobs] Google Calendar reminders scheduled — every minute');
+  } else {
+    console.log('[jobs] Google Calendar reminders disabled — run: npx tsx scripts/setup-google-account.ts');
   }
 }
