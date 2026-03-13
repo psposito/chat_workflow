@@ -38,7 +38,6 @@ function getImapClient(): ImapFlow {
     },
     logger: false,
     connectionTimeout: 10000,
-    greetTimeout: 10000,
     socketTimeout: 15000,
   });
 }
