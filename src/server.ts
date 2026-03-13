@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express, { Request, Response } from 'express';
-import { initDb } from './db/database';
+import { google } from 'googleapis';
+import { initDb, upsertGoogleAccount } from './db/database';
 import { router } from './router';
 import { startJobs, triggerSeoDigest, triggerDueTimeAlerts, triggerGmailPoll, triggerCalendarReminders } from './schedulers/jobs';
 import { sendWhatsApp } from './twilio';
@@ -83,6 +84,80 @@ app.post('/webhook', async (req: Request, res: Response) => {
         console.error('[webhook] Failed to send chunk:', err),
       );
     }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /auth/google — initiate OAuth2 web flow to link a Google account
+// ---------------------------------------------------------------------------
+
+app.get('/auth/google', (_req: Request, res: Response) => {
+  const oauth2Client = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+    process.env.GOOGLE_REDIRECT_URI,
+  );
+  const url = oauth2Client.generateAuthUrl({
+    access_type: 'offline',
+    prompt: 'consent',
+    scope: [
+      'https://www.googleapis.com/auth/calendar',
+      'https://www.googleapis.com/auth/userinfo.email',
+      'https://www.googleapis.com/auth/userinfo.profile',
+    ],
+  });
+  res.redirect(url);
+});
+
+// ---------------------------------------------------------------------------
+// GET /auth/google/callback — OAuth2 callback: exchange code, save tokens
+// ---------------------------------------------------------------------------
+
+app.get('/auth/google/callback', async (req: Request, res: Response) => {
+  const code = req.query.code as string | undefined;
+  if (!code) {
+    res.status(400).send('Missing authorization code.');
+    return;
+  }
+
+  try {
+    const oauth2Client = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.GOOGLE_REDIRECT_URI,
+    );
+
+    const { tokens } = await oauth2Client.getToken(code);
+    oauth2Client.setCredentials(tokens);
+
+    const oauth2Api = google.oauth2({ version: 'v2', auth: oauth2Client });
+    const { data } = await oauth2Api.userinfo.get();
+
+    const expiry = tokens.expiry_date
+      ? new Date(tokens.expiry_date).toISOString()
+      : new Date(Date.now() + 3_600_000).toISOString();
+
+    upsertGoogleAccount(
+      data.email!,
+      data.name ?? data.email!,
+      tokens.refresh_token ?? '',
+      tokens.access_token ?? null,
+      expiry,
+      'calendar userinfo',
+    );
+
+    console.log(`[auth] Google account linked: ${data.email}`);
+    res.send(`<html><body style="font-family:sans-serif;padding:2rem">
+      <h2>✅ Conta vinculada com sucesso!</h2>
+      <p><strong>${data.email}</strong> foi conectada ao bot.</p>
+      <p>Pode fechar esta aba.</p>
+    </body></html>`);
+  } catch (err) {
+    console.error('[auth] Google callback error:', err);
+    res.status(500).send(`<html><body style="font-family:sans-serif;padding:2rem">
+      <h2>❌ Erro ao vincular conta</h2>
+      <p>${(err as Error).message}</p>
+    </body></html>`);
   }
 });
 

@@ -313,7 +313,7 @@ export function formatCalendarReminder(event: CalendarEvent, minutesAhead: numbe
 // ---------------------------------------------------------------------------
 
 const NO_ACCOUNTS_MSG =
-  '⚠️ Nenhuma conta Google vinculada.\n\nExecute no servidor:\n`npx tsx scripts/setup-google-account.ts`';
+  '⚠️ Nenhuma conta Google vinculada.\n\nAcesse pelo navegador para conectar:\n`https://<seu-dominio>/auth/google`';
 
 export async function listTodayEventsForPhone(_phone: string): Promise<string> {
   const accounts = getEnabledGoogleAccounts();
