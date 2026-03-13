@@ -104,6 +104,36 @@ export function initDb(): Database.Database {
     // Column already exists — ignore
   }
 
+  // Migration: expand gmail_emails.feedback CHECK to 4-category system
+  const gmailEmailsSchema = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='gmail_emails'")
+    .get() as { sql: string } | undefined;
+  if (gmailEmailsSchema?.sql && !gmailEmailsSchema.sql.includes('urgente')) {
+    try {
+      db.pragma('foreign_keys = OFF');
+      db.exec(`
+        CREATE TABLE gmail_emails_new (
+          id           INTEGER PRIMARY KEY AUTOINCREMENT,
+          message_id   TEXT    UNIQUE NOT NULL,
+          sender       TEXT    NOT NULL,
+          subject      TEXT    NOT NULL,
+          ai_score     REAL    NOT NULL DEFAULT 0,
+          notified     INTEGER NOT NULL DEFAULT 0,
+          feedback     TEXT    CHECK(feedback IN ('urgente', 'importante', 'baixa_prioridade', 'nao_importante', 'important', 'not_important')),
+          fetched_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT OR IGNORE INTO gmail_emails_new SELECT * FROM gmail_emails;
+        DROP TABLE gmail_emails;
+        ALTER TABLE gmail_emails_new RENAME TO gmail_emails;
+      `);
+      db.pragma('foreign_keys = ON');
+      console.log('[db] Migrated gmail_emails: feedback column now supports 4-category system');
+    } catch (e) {
+      db.pragma('foreign_keys = ON');
+      console.warn('[db] gmail_emails migration skipped:', (e as Error).message);
+    }
+  }
+
   console.log('[db] Database initialised at', DB_PATH);
   return db;
 }
@@ -209,8 +239,9 @@ export function isEmailNotified(messageId: string): boolean {
     .prepare(`SELECT 1 FROM gmail_notified WHERE message_id = ?`)
     .get(messageId);
   if (inOld) return true;
+  // Any entry in gmail_emails means the email has been processed (scored) already
   const inNew = getDb()
-    .prepare(`SELECT 1 FROM gmail_emails WHERE message_id = ? AND notified = 1`)
+    .prepare(`SELECT 1 FROM gmail_emails WHERE message_id = ?`)
     .get(messageId);
   return !!inNew;
 }
@@ -225,6 +256,10 @@ export function markEmailNotified(messageId: string): void {
 // Gmail — smart emails
 // ---------------------------------------------------------------------------
 
+export type EmailCategory = 'urgente' | 'importante' | 'baixa_prioridade' | 'nao_importante';
+// Legacy values kept for backward compatibility
+export type EmailFeedback = EmailCategory | 'important' | 'not_important';
+
 export interface GmailEmail {
   id: number;
   message_id: string;
@@ -232,7 +267,7 @@ export interface GmailEmail {
   subject: string;
   ai_score: number;
   notified: 0 | 1;
-  feedback: 'important' | 'not_important' | null;
+  feedback: EmailFeedback | null;
   fetched_at: string;
 }
 
@@ -268,8 +303,11 @@ export function getSenderReputation(sender: string): SenderReputation | null {
     .get(sender) as SenderReputation | null;
 }
 
-export function updateSenderReputation(sender: string, feedback: 'important' | 'not_important'): void {
-  const col = feedback === 'important' ? 'important_count' : 'not_important_count';
+export function updateSenderReputation(sender: string, feedback: EmailFeedback): void {
+  const col =
+    feedback === 'important' || feedback === 'urgente' || feedback === 'importante'
+      ? 'important_count'
+      : 'not_important_count';
   getDb().prepare(`
     INSERT INTO sender_reputation (sender, ${col})
     VALUES (?, 1)
@@ -277,7 +315,7 @@ export function updateSenderReputation(sender: string, feedback: 'important' | '
   `).run(sender);
 }
 
-export function setEmailFeedback(id: number, feedback: 'important' | 'not_important'): GmailEmail | null {
+export function setEmailFeedback(id: number, feedback: EmailFeedback): GmailEmail | null {
   getDb()
     .prepare(`UPDATE gmail_emails SET feedback = ? WHERE id = ?`)
     .run(feedback, id);

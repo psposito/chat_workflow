@@ -104,20 +104,24 @@ export async function router(phone: string, message: string): Promise<string> {
     return createEventForPhone(phone, message);
   }
 
-  // Gmail feedback — "importante 2" / "não importante 1"
-  const importantMatch = n.match(/^(?:email\s+)?(\d+)\s+(?:e|é)\s+importante$|^importante\s+(\d+)$/);
-  const notImportantMatch = n.match(/^(?:email\s+)?(\d+)\s+n[aã]o\s+(?:e|é)\s+importante$|^n[aã]o\s+importante\s+(\d+)$/);
-  if (importantMatch) {
-    const idx = parseInt(importantMatch[1] ?? importantMatch[2], 10);
-    return recordEmailFeedback(phone, idx, 'important');
-  }
-  if (notImportantMatch) {
-    const idx = parseInt(notImportantMatch[1] ?? notImportantMatch[2], 10);
-    return recordEmailFeedback(phone, idx, 'not_important');
-  }
+  // Gmail feedback — 4 categories with or without email index
+  // Patterns: "urgente 1", "importante 2", "baixa prioridade 3", "não importante 1"
+  // Also: "1 é urgente", "2 é importante", etc.
+  const urgenteMatch = n.match(/^urgente\s+(\d+)$|^(?:email\s+)?(\d+)\s+(?:e|é)\s+urgente$/);
+  const importanteMatch = n.match(/^importante\s+(\d+)$|^(?:email\s+)?(\d+)\s+(?:e|é)\s+importante$/);
+  const baixaMatch = n.match(/^baixa\s+prioridade\s+(\d+)$|^(?:email\s+)?(\d+)\s+(?:e|é)\s+baixa\s+prioridade$/);
+  const naoImportanteMatch = n.match(/^n[aã]o\s+importante\s+(\d+)$|^(?:email\s+)?(\d+)\s+n[aã]o\s+(?:e|é)\s+importante$/);
+
+  if (urgenteMatch) return recordEmailFeedback(phone, parseInt(urgenteMatch[1] ?? urgenteMatch[2], 10), 'urgente');
+  if (importanteMatch) return recordEmailFeedback(phone, parseInt(importanteMatch[1] ?? importanteMatch[2], 10), 'importante');
+  if (baixaMatch) return recordEmailFeedback(phone, parseInt(baixaMatch[1] ?? baixaMatch[2], 10), 'baixa_prioridade');
+  if (naoImportanteMatch) return recordEmailFeedback(phone, parseInt(naoImportanteMatch[1] ?? naoImportanteMatch[2], 10), 'nao_importante');
+
   // Simple form without number — assumes index 1 (single-email batch)
-  if (n === 'importante') return recordEmailFeedback(phone, 1, 'important');
-  if (n === 'não importante' || n === 'nao importante') return recordEmailFeedback(phone, 1, 'not_important');
+  if (n === 'urgente') return recordEmailFeedback(phone, 1, 'urgente');
+  if (n === 'importante') return recordEmailFeedback(phone, 1, 'importante');
+  if (n === 'baixa prioridade') return recordEmailFeedback(phone, 1, 'baixa_prioridade');
+  if (n === 'não importante' || n === 'nao importante') return recordEmailFeedback(phone, 1, 'nao_importante');
 
   // Gmail check on demand
   if (matchesAny(n, ['meus emails', 'meu email', 'checar email', 'verificar email', 'emails novos', 'novos emails'])) {
