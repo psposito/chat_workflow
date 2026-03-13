@@ -13,6 +13,8 @@ import {
   getEnabledGoogleAccounts,
   updateGoogleAccountTokens,
   disableGoogleAccount,
+  getPollState,
+  setPollState,
   SenderReputation,
   GmailEmail,
   GoogleAccount,
@@ -167,6 +169,19 @@ export async function fetchAndScoreEmails(): Promise<FetchResult> {
   let scanned = 0;
 
   for (const account of accounts) {
+    const stateKey = `gmail_last_polled_${account.email}`;
+    const lastPolledStr = getPollState(stateKey);
+
+    // First run for this account: record current time and skip existing emails
+    if (!lastPolledStr) {
+      setPollState(stateKey, String(Date.now()));
+      console.log(`[gmail] First run for ${account.email} — recording start time, skipping existing emails.`);
+      continue;
+    }
+
+    const afterSecs = Math.floor((parseInt(lastPolledStr, 10) - 120_000) / 1000); // 2 min overlap to avoid gaps
+    setPollState(stateKey, String(Date.now()));
+
     const auth = buildOAuth2Client(account);
     const gmailApi = google.gmail({ version: 'v1', auth });
 
@@ -174,7 +189,7 @@ export async function fetchAndScoreEmails(): Promise<FetchResult> {
     try {
       const listRes = await gmailApi.users.messages.list({
         userId: 'me',
-        q: 'is:unread in:inbox',
+        q: `is:unread in:inbox after:${afterSecs}`,
         maxResults: 20,
       });
       messageIds = (listRes.data.messages ?? []).map((m) => m.id!).filter(Boolean);

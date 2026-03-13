@@ -88,6 +88,13 @@ export function initDb(): Database.Database {
       notified_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       PRIMARY KEY (event_id, account_id)
     );
+
+    -- Generic key-value state (e.g. last poll timestamps)
+    CREATE TABLE IF NOT EXISTS poll_state (
+      key        TEXT PRIMARY KEY,
+      value      TEXT NOT NULL,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   // Migration: add notified column if it doesn't exist yet
@@ -421,6 +428,26 @@ export function saveMemory(
     RETURNING *
   `);
   return stmt.get(phone, role, content) as MemoryEntry;
+}
+
+// ---------------------------------------------------------------------------
+// Poll state (generic key-value)
+// ---------------------------------------------------------------------------
+
+export function getPollState(key: string): string | null {
+  const row = getDb()
+    .prepare(`SELECT value FROM poll_state WHERE key = ?`)
+    .get(key) as { value: string } | undefined;
+  return row?.value ?? null;
+}
+
+export function setPollState(key: string, value: string): void {
+  getDb()
+    .prepare(
+      `INSERT INTO poll_state (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`,
+    )
+    .run(key, value);
 }
 
 export function pruneMemory(phone: string, keep = 10): void {
