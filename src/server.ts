@@ -102,6 +102,8 @@ app.get('/auth/google', (_req: Request, res: Response) => {
     prompt: 'consent',
     scope: [
       'https://www.googleapis.com/auth/calendar',
+      'https://www.googleapis.com/auth/gmail.readonly',
+      'https://www.googleapis.com/auth/gmail.modify',
       'https://www.googleapis.com/auth/userinfo.email',
       'https://www.googleapis.com/auth/userinfo.profile',
     ],
@@ -143,7 +145,7 @@ app.get('/auth/google/callback', async (req: Request, res: Response) => {
       tokens.refresh_token ?? '',
       tokens.access_token ?? null,
       expiry,
-      'calendar userinfo',
+      'calendar gmail userinfo',
     );
 
     console.log(`[auth] Google account linked: ${data.email}`);

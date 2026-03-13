@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
-import { ImapFlow } from 'imapflow';
+import { google } from 'googleapis';
+import type { OAuth2Client } from 'google-auth-library';
 import {
   isEmailNotified,
   upsertGmailEmail,
@@ -9,8 +10,12 @@ import {
   setEmailFeedback,
   saveNotificationBatch,
   getEmailByBatchIndex,
+  getEnabledGoogleAccounts,
+  updateGoogleAccountTokens,
+  disableGoogleAccount,
   SenderReputation,
   GmailEmail,
+  GoogleAccount,
 } from '../db/database';
 
 // ---------------------------------------------------------------------------
@@ -24,22 +29,40 @@ function getOpenAI(): OpenAI {
 }
 
 // ---------------------------------------------------------------------------
-// IMAP client factory
+// OAuth2 client factory (reuses same pattern as googleCalendar.ts)
 // ---------------------------------------------------------------------------
 
-function getImapClient(): ImapFlow {
-  return new ImapFlow({
-    host: 'imap.gmail.com',
-    port: 993,
-    secure: true,
-    auth: {
-      user: process.env.GMAIL_USER!,
-      pass: process.env.GMAIL_APP_PASSWORD!,
-    },
-    logger: false,
-    connectionTimeout: 10000,
-    socketTimeout: 15000,
+function buildOAuth2Client(account: GoogleAccount): OAuth2Client {
+  const client = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+  );
+
+  client.setCredentials({
+    access_token: account.access_token,
+    refresh_token: account.refresh_token,
+    expiry_date: account.token_expiry ? new Date(account.token_expiry).getTime() : undefined,
   });
+
+  client.on('tokens', (tokens) => {
+    if (tokens.access_token) {
+      const expiry = tokens.expiry_date
+        ? new Date(tokens.expiry_date).toISOString()
+        : new Date(Date.now() + 3_600_000).toISOString();
+      updateGoogleAccountTokens(account.id, tokens.access_token, expiry);
+    }
+  });
+
+  return client;
+}
+
+// ---------------------------------------------------------------------------
+// Parse "From" header — extract email address from "Name <email>" or plain
+// ---------------------------------------------------------------------------
+
+function parseSender(fromHeader: string): string {
+  const match = fromHeader.match(/<([^>]+)>/);
+  return match ? match[1] : fromHeader.trim();
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +136,7 @@ Considere NÃO IMPORTANTES (score baixo): newsletters, promoções, marketing, r
 const NOTIFY_THRESHOLD = 0.5;
 
 // ---------------------------------------------------------------------------
-// Main fetch + score + notify pipeline
+// Main fetch + score + notify pipeline (Gmail API — HTTPS, no IMAP needed)
 // ---------------------------------------------------------------------------
 
 export interface EmailToNotify {
@@ -127,34 +150,63 @@ export interface EmailToNotify {
 }
 
 export async function fetchAndScoreEmails(): Promise<EmailToNotify[]> {
-  const user = process.env.GMAIL_USER;
-  const pass = process.env.GMAIL_APP_PASSWORD;
-  if (!user || !pass) {
-    console.warn('[gmail] GMAIL_USER or GMAIL_APP_PASSWORD not set — skipping.');
+  const accounts = getEnabledGoogleAccounts();
+  if (accounts.length === 0) {
+    console.warn('[gmail] No Google accounts linked — skipping.');
     return [];
   }
 
-  const client = getImapClient();
   const results: EmailToNotify[] = [];
 
-  try {
-    await client.connect();
-    await client.mailboxOpen('INBOX');
+  for (const account of accounts) {
+    const auth = buildOAuth2Client(account);
+    const gmailApi = google.gmail({ version: 'v1', auth });
 
-    const searchResult = await client.search({ seen: false });
-    const uids = Array.isArray(searchResult) ? searchResult : [];
-    if (uids.length === 0) return [];
+    let messageIds: string[];
+    try {
+      const listRes = await gmailApi.users.messages.list({
+        userId: 'me',
+        q: 'is:unread in:inbox',
+        maxResults: 20,
+      });
+      messageIds = (listRes.data.messages ?? []).map((m) => m.id!).filter(Boolean);
+    } catch (err: any) {
+      if (err?.status === 401 || err?.status === 403) {
+        console.warn(`[gmail] Account ${account.email} lacks Gmail scope or token revoked — skipping.`);
+      } else {
+        console.error(`[gmail] Failed to list messages for ${account.email}:`, (err as Error).message);
+      }
+      continue;
+    }
 
-    for await (const msg of client.fetch(uids, { envelope: true })) {
-      const env = msg.envelope!;
-      const messageId = env.messageId ?? `uid-${msg.uid}`;
-      const sender = env.from?.[0]?.address ?? env.from?.[0]?.name ?? 'unknown';
-      const subject = env.subject ?? '(sem assunto)';
-      const date = env.date
-        ? env.date.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })
-        : '';
+    for (const msgId of messageIds) {
+      if (isEmailNotified(msgId)) continue;
 
-      if (isEmailNotified(messageId)) continue;
+      let sender = 'unknown';
+      let subject = '(sem assunto)';
+      let date = '';
+
+      try {
+        const msgRes = await gmailApi.users.messages.get({
+          userId: 'me',
+          id: msgId,
+          format: 'metadata',
+          metadataHeaders: ['From', 'Subject', 'Date'],
+        });
+
+        const headers = msgRes.data.payload?.headers ?? [];
+        const get = (name: string) => headers.find((h) => h.name === name)?.value ?? '';
+
+        sender = parseSender(get('From')) || 'unknown';
+        subject = get('Subject') || '(sem assunto)';
+        const rawDate = get('Date');
+        date = rawDate
+          ? new Date(rawDate).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })
+          : '';
+      } catch (err) {
+        console.error(`[gmail] Failed to fetch message ${msgId}:`, (err as Error).message);
+        continue;
+      }
 
       const rep = getSenderReputation(sender);
       const repDecision = reputationDecision(rep);
@@ -178,23 +230,26 @@ export async function fetchAndScoreEmails(): Promise<EmailToNotify[]> {
         decisionSource = 'ai';
       }
 
-      // Persist email record
-      const email = upsertGmailEmail(messageId, sender, subject, score);
+      const email = upsertGmailEmail(msgId, sender, subject, score);
+      markGmailEmailNotified(email.id);
+
+      // Mark as read in Gmail so it won't appear in future polls
+      try {
+        await gmailApi.users.messages.modify({
+          userId: 'me',
+          id: msgId,
+          requestBody: { removeLabelIds: ['UNREAD'] },
+        });
+      } catch (err) {
+        console.warn(`[gmail] Could not mark message ${msgId} as read:`, (err as Error).message);
+      }
 
       if (score >= NOTIFY_THRESHOLD) {
-        // Mark as seen in Gmail to avoid re-fetching
-        await client.messageFlagsAdd({ uid: msg.uid }, ['\\Seen'], { uid: true });
-        markGmailEmailNotified(email.id);
         results.push({ dbId: email.id, sender, subject, date, score, reason, decisionSource });
       } else {
         console.log(`[gmail] Skipped (score ${score.toFixed(2)}): ${sender} — ${subject}`);
-        // Still mark as seen so we don't keep re-evaluating
-        await client.messageFlagsAdd({ uid: msg.uid }, ['\\Seen'], { uid: true });
-        markGmailEmailNotified(email.id);
       }
     }
-  } finally {
-    await client.logout();
   }
 
   return results;
