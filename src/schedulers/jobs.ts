@@ -172,8 +172,49 @@ export async function triggerCalendarReminders(): Promise<void> {
   return runCalendarReminders();
 }
 
-export async function triggerGmailPoll(): Promise<void> {
-  return runGmailPoll();
+export interface GmailPollResult {
+  phones: string[];
+  emailsFound: number;
+  emailsSent: number;
+  errors: string[];
+}
+
+export async function triggerGmailPoll(): Promise<GmailPollResult> {
+  const phones = getNotifyPhones();
+  const errors: string[] = [];
+
+  if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
+    return { phones, emailsFound: 0, emailsSent: 0, errors: ['GMAIL_USER or GMAIL_APP_PASSWORD not set'] };
+  }
+
+  if (phones.length === 0) {
+    return { phones, emailsFound: 0, emailsSent: 0, errors: ['NOTIFY_PHONES is empty'] };
+  }
+
+  let emails;
+  try {
+    emails = await fetchNewImportantEmails();
+  } catch (err) {
+    return { phones, emailsFound: 0, emailsSent: 0, errors: [(err as Error).message] };
+  }
+
+  if (emails.length === 0) {
+    return { phones, emailsFound: 0, emailsSent: 0, errors: [] };
+  }
+
+  const message = formatEmailsForWhatsApp(emails);
+  let emailsSent = 0;
+  for (const phone of phones) {
+    try {
+      await sendWhatsApp(phone.replace('whatsapp:', ''), message);
+      persistNotificationBatch(phone, emails);
+      emailsSent++;
+    } catch (err) {
+      errors.push(`Failed to send to ${phone}: ${(err as Error).message}`);
+    }
+  }
+
+  return { phones, emailsFound: emails.length, emailsSent, errors };
 }
 
 export async function triggerDueTimeAlerts(): Promise<void> {

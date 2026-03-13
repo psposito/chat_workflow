@@ -193,8 +193,8 @@ app.post('/trigger-alerts', async (_req: Request, res: Response) => {
 
 app.post('/trigger-gmail', async (_req: Request, res: Response) => {
   try {
-    await triggerGmailPoll();
-    res.json({ status: 'ok', message: 'Gmail poll completed' });
+    const result = await triggerGmailPoll();
+    res.json({ status: result.errors.length === 0 ? 'ok' : 'partial', ...result });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }
