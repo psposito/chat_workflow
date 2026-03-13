@@ -37,6 +37,35 @@ export function initDb(): Database.Database {
       message_id  TEXT PRIMARY KEY,
       notified_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    -- Smart Gmail: per-email record with AI score + user feedback
+    CREATE TABLE IF NOT EXISTS gmail_emails (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      message_id   TEXT    UNIQUE NOT NULL,
+      sender       TEXT    NOT NULL,
+      subject      TEXT    NOT NULL,
+      ai_score     REAL    NOT NULL DEFAULT 0,
+      notified     INTEGER NOT NULL DEFAULT 0,
+      feedback     TEXT    CHECK(feedback IN ('important', 'not_important', NULL)),
+      fetched_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Learned sender reputation from user feedback
+    CREATE TABLE IF NOT EXISTS sender_reputation (
+      sender              TEXT PRIMARY KEY,
+      important_count     INTEGER NOT NULL DEFAULT 0,
+      not_important_count INTEGER NOT NULL DEFAULT 0,
+      updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Maps the numbered index shown in the notification to email IDs (per phone)
+    CREATE TABLE IF NOT EXISTS gmail_notification_batch (
+      phone      TEXT    NOT NULL,
+      idx        INTEGER NOT NULL,
+      email_id   INTEGER NOT NULL REFERENCES gmail_emails(id),
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (phone, idx)
+    );
   `);
 
   // Migration: add notified column if it doesn't exist yet
@@ -143,20 +172,108 @@ export function listTasksDueToday(): Map<string, Task[]> {
 }
 
 // ---------------------------------------------------------------------------
-// Gmail notifications
+// Gmail — legacy notified table (kept for backward compat)
 // ---------------------------------------------------------------------------
 
 export function isEmailNotified(messageId: string): boolean {
-  const row = getDb()
+  const inOld = getDb()
     .prepare(`SELECT 1 FROM gmail_notified WHERE message_id = ?`)
     .get(messageId);
-  return !!row;
+  if (inOld) return true;
+  const inNew = getDb()
+    .prepare(`SELECT 1 FROM gmail_emails WHERE message_id = ? AND notified = 1`)
+    .get(messageId);
+  return !!inNew;
 }
 
 export function markEmailNotified(messageId: string): void {
   getDb()
     .prepare(`INSERT OR IGNORE INTO gmail_notified (message_id) VALUES (?)`)
     .run(messageId);
+}
+
+// ---------------------------------------------------------------------------
+// Gmail — smart emails
+// ---------------------------------------------------------------------------
+
+export interface GmailEmail {
+  id: number;
+  message_id: string;
+  sender: string;
+  subject: string;
+  ai_score: number;
+  notified: 0 | 1;
+  feedback: 'important' | 'not_important' | null;
+  fetched_at: string;
+}
+
+export interface SenderReputation {
+  sender: string;
+  important_count: number;
+  not_important_count: number;
+}
+
+export function upsertGmailEmail(
+  messageId: string,
+  sender: string,
+  subject: string,
+  aiScore: number,
+): GmailEmail {
+  getDb().prepare(`
+    INSERT INTO gmail_emails (message_id, sender, subject, ai_score)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(message_id) DO UPDATE SET ai_score = excluded.ai_score
+  `).run(messageId, sender, subject, aiScore);
+  return getDb()
+    .prepare(`SELECT * FROM gmail_emails WHERE message_id = ?`)
+    .get(messageId) as GmailEmail;
+}
+
+export function markGmailEmailNotified(id: number): void {
+  getDb().prepare(`UPDATE gmail_emails SET notified = 1 WHERE id = ?`).run(id);
+}
+
+export function getSenderReputation(sender: string): SenderReputation | null {
+  return getDb()
+    .prepare(`SELECT * FROM sender_reputation WHERE sender = ?`)
+    .get(sender) as SenderReputation | null;
+}
+
+export function updateSenderReputation(sender: string, feedback: 'important' | 'not_important'): void {
+  const col = feedback === 'important' ? 'important_count' : 'not_important_count';
+  getDb().prepare(`
+    INSERT INTO sender_reputation (sender, ${col})
+    VALUES (?, 1)
+    ON CONFLICT(sender) DO UPDATE SET ${col} = ${col} + 1, updated_at = CURRENT_TIMESTAMP
+  `).run(sender);
+}
+
+export function setEmailFeedback(id: number, feedback: 'important' | 'not_important'): GmailEmail | null {
+  getDb()
+    .prepare(`UPDATE gmail_emails SET feedback = ? WHERE id = ?`)
+    .run(feedback, id);
+  return getDb()
+    .prepare(`SELECT * FROM gmail_emails WHERE id = ?`)
+    .get(id) as GmailEmail | null;
+}
+
+export function saveNotificationBatch(phone: string, entries: { idx: number; emailId: number }[]): void {
+  const db = getDb();
+  db.prepare(`DELETE FROM gmail_notification_batch WHERE phone = ?`).run(phone);
+  const stmt = db.prepare(
+    `INSERT INTO gmail_notification_batch (phone, idx, email_id) VALUES (?, ?, ?)`,
+  );
+  for (const { idx, emailId } of entries) {
+    stmt.run(phone, idx, emailId);
+  }
+}
+
+export function getEmailByBatchIndex(phone: string, idx: number): GmailEmail | null {
+  return getDb().prepare(`
+    SELECT e.* FROM gmail_emails e
+    JOIN gmail_notification_batch b ON b.email_id = e.id
+    WHERE b.phone = ? AND b.idx = ?
+  `).get(phone, idx) as GmailEmail | null;
 }
 
 // ---------------------------------------------------------------------------

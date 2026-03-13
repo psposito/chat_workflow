@@ -1,7 +1,12 @@
 import { chat } from './modules/chat';
 import { extractAndSaveTask, listTasks, removeTask, removeAllTasks } from './modules/tasks';
 import { runSeoRadar } from './modules/seoRadar';
-import { fetchNewImportantEmails, formatEmailsForWhatsApp } from './modules/gmail';
+import {
+  fetchNewImportantEmails,
+  formatEmailsForWhatsApp,
+  persistNotificationBatch,
+  recordEmailFeedback,
+} from './modules/gmail';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -31,6 +36,8 @@ function buildHelpText(): string {
     '',
     '📧 *Gmail*',
     '  • _meus emails_ — verifica e-mails importantes não lidos',
+    '  • _importante 1_ — marca o e-mail #1 como importante (treina a IA)',
+    '  • _não importante 2_ — marca o e-mail #2 como irrelevante (treina a IA)',
     '',
     '📡 *SEO*',
     '  • _seo_, _novidades_ ou _radar_ — digest de notícias de SEO',
@@ -79,9 +86,22 @@ export async function router(phone: string, message: string): Promise<string> {
     return buildDateTimeText();
   }
 
+  // Gmail feedback — "importante 2" / "não importante 1"
+  const importantMatch = n.match(/^(?:email\s+)?(\d+)\s+(?:e|é)\s+importante$|^importante\s+(\d+)$/);
+  const notImportantMatch = n.match(/^(?:email\s+)?(\d+)\s+n[aã]o\s+(?:e|é)\s+importante$|^n[aã]o\s+importante\s+(\d+)$/);
+  if (importantMatch) {
+    const idx = parseInt(importantMatch[1] ?? importantMatch[2], 10);
+    return recordEmailFeedback(phone, idx, 'important');
+  }
+  if (notImportantMatch) {
+    const idx = parseInt(notImportantMatch[1] ?? notImportantMatch[2], 10);
+    return recordEmailFeedback(phone, idx, 'not_important');
+  }
+
   // Gmail check on demand
   if (matchesAny(n, ['meus emails', 'meu email', 'checar email', 'verificar email', 'emails novos', 'novos emails'])) {
     const emails = await fetchNewImportantEmails();
+    if (emails.length > 0) persistNotificationBatch(phone, emails);
     return formatEmailsForWhatsApp(emails);
   }
 

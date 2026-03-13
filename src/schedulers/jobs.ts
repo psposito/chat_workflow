@@ -2,7 +2,7 @@ import cron from 'node-cron';
 import { listTasksDueToday, getTasksDueNow, markTaskNotified } from '../db/database';
 import { listTasks } from '../modules/tasks';
 import { runSeoRadar } from '../modules/seoRadar';
-import { fetchNewImportantEmails, formatEmailsForWhatsApp } from '../modules/gmail';
+import { fetchNewImportantEmails, formatEmailsForWhatsApp, persistNotificationBatch } from '../modules/gmail';
 import { sendWhatsApp } from '../twilio';
 
 const TZ = 'America/Sao_Paulo';
@@ -147,6 +147,7 @@ async function runGmailPoll(): Promise<void> {
   for (const phone of phones) {
     try {
       await sendWhatsApp(phone.replace('whatsapp:', ''), message);
+      persistNotificationBatch(phone, emails);
       console.log(`[jobs] Gmail notification sent to ${phone}`);
     } catch (err) {
       console.error(`[jobs] Failed to send Gmail notification to ${phone}:`, (err as Error).message);
