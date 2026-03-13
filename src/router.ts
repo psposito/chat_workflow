@@ -115,6 +115,9 @@ export async function router(phone: string, message: string): Promise<string> {
     const idx = parseInt(notImportantMatch[1] ?? notImportantMatch[2], 10);
     return recordEmailFeedback(phone, idx, 'not_important');
   }
+  // Simple form without number — assumes index 1 (single-email batch)
+  if (n === 'importante') return recordEmailFeedback(phone, 1, 'important');
+  if (n === 'não importante' || n === 'nao importante') return recordEmailFeedback(phone, 1, 'not_important');
 
   // Gmail check on demand
   if (matchesAny(n, ['meus emails', 'meu email', 'checar email', 'verificar email', 'emails novos', 'novos emails'])) {

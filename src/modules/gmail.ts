@@ -281,7 +281,11 @@ export function formatEmailNotification(emails: EmailToNotify[]): string {
     lines.push('');
   }
 
-  lines.push('_Responda *importante 1* ou *não importante 2* para me ensinar._');
+  if (emails.length === 1) {
+    lines.push('_Responda *importante* ou *não importante* para classificar este e-mail._');
+  } else {
+    lines.push('_Para classificar, responda *importante 1* ou *não importante 1* usando o número do e-mail acima._');
+  }
   return lines.join('\n').trim();
 }
 
