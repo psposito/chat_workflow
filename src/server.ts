@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import express, { Request, Response } from 'express';
 import { google } from 'googleapis';
-import { initDb, upsertGoogleAccount } from './db/database';
+import { initDb, upsertGoogleAccount, getEnabledGoogleAccounts, getDb } from './db/database';
 import { router } from './router';
 import { startJobs, triggerSeoDigest, triggerDueTimeAlerts, triggerGmailPoll, triggerCalendarReminders } from './schedulers/jobs';
 import { sendWhatsApp } from './twilio';
@@ -161,6 +161,17 @@ app.get('/auth/google/callback', async (req: Request, res: Response) => {
       <p>${(err as Error).message}</p>
     </body></html>`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// GET /debug/db — diagnose DB state
+// ---------------------------------------------------------------------------
+
+app.get('/debug/db', (_req: Request, res: Response) => {
+  const dbPath = process.env.DB_PATH || 'default (data/bot.db)';
+  const accounts = getEnabledGoogleAccounts();
+  const allAccounts = getDb().prepare('SELECT id, email, enabled, scopes, updated_at FROM google_accounts').all();
+  res.json({ dbPath, enabledAccounts: accounts.map(a => ({ id: a.id, email: a.email, scopes: a.scopes })), allAccounts });
 });
 
 // ---------------------------------------------------------------------------
