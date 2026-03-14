@@ -96,10 +96,14 @@ export async function router(phone: string, message: string): Promise<string> {
     return buildDateTimeText();
   }
 
-  // Pending action: account selection for calendar event ("conta 1", "conta 2", ...)
-  const contaMatch = n.match(/^conta\s+(\d+)$/);
+  // Pending action: account selection for calendar event ("conta 1", "2", etc.)
+  const contaMatch = n.match(/^(?:conta\s+)?(\d+)$/);
   if (contaMatch) {
-    return completePendingCalendarEvent(phone, parseInt(contaMatch[1], 10) - 1);
+    const { getPendingAction } = await import('./db/database');
+    const pending = getPendingAction(phone);
+    if (pending?.action_type === 'create_calendar_event') {
+      return completePendingCalendarEvent(phone, parseInt(contaMatch[1], 10) - 1);
+    }
   }
 
   // Linked accounts list
