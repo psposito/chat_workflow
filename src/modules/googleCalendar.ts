@@ -263,6 +263,22 @@ function findAccountByHint(hint: string, accounts: GoogleAccount[]): GoogleAccou
   );
 }
 
+function buildMissingInfoQuestion(partial: ExtractedEvent): string {
+  const title = partial.title ? `*"${partial.title}"*` : 'o evento';
+  if (!partial.has_date && !partial.has_time) {
+    return `📅 Qual é a *data e horário* de ${title}?\n_Ex: amanhã às 14h, sexta 10h30_`;
+  }
+  if (!partial.has_date) {
+    const time = partial.time ?? '';
+    return `📅 Qual é a *data* de ${title}${time ? ` às ${time}` : ''}?\n_Ex: amanhã, sexta-feira, 20/03_`;
+  }
+  // !has_time
+  const dateStr = partial.date
+    ? new Date(`${partial.date}T12:00:00`).toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: '2-digit', timeZone: TZ })
+    : '';
+  return `🕐 Qual é o *horário* de ${title}${dateStr ? ` em ${dateStr}` : ''}?\n_Ex: às 14h, 10h30_`;
+}
+
 function buildAccountSelectionMessage(accounts: GoogleAccount[], pendingTitle: string): string {
   const lines = [`📅 Em qual conta criar o evento *"${pendingTitle}"*?`, ''];
   accounts.forEach((a, i) => {
@@ -392,11 +408,9 @@ export async function createEventForPhone(phone: string, message: string): Promi
     return '⚠️ Não consegui entender os detalhes do evento. Tente: "agendar reunião amanhã às 14h"';
   }
 
-  if (!extracted.has_date) {
-    return '📅 Por favor informe a *data* do evento.\nEx: "agendar reunião amanhã às 14h"';
-  }
-  if (!extracted.has_time) {
-    return '🕐 Por favor informe o *horário* do evento.\nEx: "agendar reunião amanhã às 14h"';
+  if (!extracted.has_date || !extracted.has_time) {
+    savePendingAction(phone, 'calendar_missing_info', extracted);
+    return buildMissingInfoQuestion(extracted);
   }
 
   // Single account — create directly
@@ -429,6 +443,49 @@ export async function completePendingCalendarEvent(phone: string, accountIndex: 
   const extracted = JSON.parse(pending.payload) as ExtractedEvent;
   clearPendingAction(phone);
   return doCreateEvent(accounts[accountIndex], extracted, accounts.length);
+}
+
+export async function completePendingCalendarInfo(phone: string, reply: string): Promise<string> {
+  const pending = getPendingAction(phone);
+  if (!pending || pending.action_type !== 'calendar_missing_info') return '';
+
+  const partial = JSON.parse(pending.payload) as ExtractedEvent;
+
+  // Re-extract date/time from user's reply, merging into partial
+  let update: ExtractedEvent;
+  try {
+    update = await extractEventFromMessage(`${partial.title}: ${reply}`);
+  } catch {
+    return buildMissingInfoQuestion(partial);
+  }
+
+  const merged: ExtractedEvent = {
+    ...partial,
+    date: update.has_date ? update.date : partial.date,
+    time: update.has_time ? update.time : partial.time,
+    duration_minutes: update.duration_minutes > 0 ? update.duration_minutes : partial.duration_minutes,
+    has_date: partial.has_date || update.has_date,
+    has_time: partial.has_time || update.has_time,
+  };
+
+  if (!merged.has_date || !merged.has_time) {
+    savePendingAction(phone, 'calendar_missing_info', merged);
+    return buildMissingInfoQuestion(merged);
+  }
+
+  clearPendingAction(phone);
+
+  const accounts = getEnabledGoogleAccounts();
+  if (accounts.length === 0) return NO_ACCOUNTS_MSG;
+  if (accounts.length === 1) return doCreateEvent(accounts[0], merged, 1);
+
+  if (merged.account_hint) {
+    const matched = findAccountByHint(merged.account_hint, accounts);
+    if (matched) return doCreateEvent(matched, merged, accounts.length);
+  }
+
+  savePendingAction(phone, 'create_calendar_event', merged);
+  return buildAccountSelectionMessage(accounts, merged.title);
 }
 
 export function listLinkedAccounts(phone?: string): string {

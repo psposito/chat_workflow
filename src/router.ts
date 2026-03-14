@@ -11,6 +11,7 @@ import {
   listTodayEventsForPhone,
   createEventForPhone,
   completePendingCalendarEvent,
+  completePendingCalendarInfo,
   listLinkedAccounts,
 } from './modules/googleCalendar';
 
@@ -179,6 +180,16 @@ export async function router(phone: string, message: string): Promise<string> {
 
   if (hasTaskKeyword || hasTimePattern) {
     return extractAndSaveTask(phone, message);
+  }
+
+  // Pending calendar_missing_info: user is answering a date/time question
+  {
+    const { getPendingAction: pa } = await import('./db/database');
+    const pend = pa(phone);
+    if (pend?.action_type === 'calendar_missing_info') {
+      const result = await completePendingCalendarInfo(phone, message);
+      if (result) return result;
+    }
   }
 
   // Fallback: free chat with memory
