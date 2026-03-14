@@ -240,11 +240,7 @@ export function startJobs(): void {
   cron.schedule('*/5 * * * *', runGmailPoll, { timezone: TZ });
   console.log('[jobs] Gmail polling scheduled — every 5 minutes');
 
-  // Google Calendar reminders — every minute (only if accounts are linked)
-  if (getEnabledGoogleAccounts().length > 0) {
-    cron.schedule('* * * * *', runCalendarReminders, { timezone: TZ });
-    console.log('[jobs] Google Calendar reminders scheduled — every minute');
-  } else {
-    console.log('[jobs] Google Calendar reminders disabled — run: npx tsx scripts/setup-google-account.ts');
-  }
+  // Google Calendar reminders — every minute (accounts checked at runtime)
+  cron.schedule('* * * * *', runCalendarReminders, { timezone: TZ });
+  console.log('[jobs] Google Calendar reminders scheduled — every minute');
 }

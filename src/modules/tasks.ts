@@ -53,12 +53,16 @@ Retorne apenas o JSON, sem texto adicional.`,
   const raw = completion.choices[0]?.message?.content ?? '{}';
   const extracted: ExtractedTask = JSON.parse(raw);
 
+  // Normalize time to HH:MM (GPT may return "9:00" instead of "09:00")
+  const rawTime = extracted.has_time ? (extracted.time ?? undefined) : undefined;
+  const dueTime = rawTime ? rawTime.padStart(5, '0') : undefined;
+
   const task = saveTask(
     phone,
     extracted.title,
     extracted.description,
     extracted.has_date ? (extracted.date ?? undefined) : undefined,
-    extracted.has_time ? (extracted.time ?? undefined) : undefined,
+    dueTime,
   );
 
   return buildConfirmation(task);
