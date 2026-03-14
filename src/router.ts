@@ -7,7 +7,12 @@ import {
   persistNotificationBatch,
   recordEmailFeedback,
 } from './modules/gmail';
-import { listTodayEventsForPhone, createEventForPhone } from './modules/googleCalendar';
+import {
+  listTodayEventsForPhone,
+  createEventForPhone,
+  completePendingCalendarEvent,
+  listLinkedAccounts,
+} from './modules/googleCalendar';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -89,6 +94,17 @@ export async function router(phone: string, message: string): Promise<string> {
   // Date / time
   if (matchesAny(n, ['que horas', 'que dia', 'data', 'hora', 'horario'])) {
     return buildDateTimeText();
+  }
+
+  // Pending action: account selection for calendar event ("conta 1", "conta 2", ...)
+  const contaMatch = n.match(/^conta\s+(\d+)$/);
+  if (contaMatch) {
+    return completePendingCalendarEvent(phone, parseInt(contaMatch[1], 10) - 1);
+  }
+
+  // Linked accounts list
+  if (matchesAny(n, ['minhas contas', 'contas vinculadas', 'contas google', 'quais contas'])) {
+    return listLinkedAccounts(phone);
   }
 
   // Calendar — list today's events

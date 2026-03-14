@@ -8,6 +8,9 @@ import {
   disableGoogleAccount,
   isCalendarEventNotified,
   markCalendarEventNotified,
+  savePendingAction,
+  getPendingAction,
+  clearPendingAction,
 } from '../db/database';
 
 const TZ = 'America/Sao_Paulo';
@@ -207,6 +210,7 @@ interface ExtractedEvent {
   duration_minutes: number;
   has_date: boolean;
   has_time: boolean;
+  account_hint: string | null; // account alias/email mentioned by user, or null
 }
 
 async function extractEventFromMessage(message: string): Promise<ExtractedEvent> {
@@ -225,6 +229,7 @@ async function extractEventFromMessage(message: string): Promise<ExtractedEvent>
 - duration_minutes: number (duração em minutos, padrão 60 se não mencionado)
 - has_date: boolean
 - has_time: boolean
+- account_hint: string | null (alias ou e-mail de conta mencionado, ex: "trabalho", "pessoal", ou null se não mencionado)
 
 Hoje é ${today}. Interprete "amanhã", "próxima segunda", "daqui a 3 dias", etc.
 Retorne apenas o JSON, sem texto adicional.`,
@@ -243,7 +248,31 @@ Retorne apenas o JSON, sem texto adicional.`,
     duration_minutes: extracted.duration_minutes ?? 60,
     has_date: extracted.has_date ?? false,
     has_time: extracted.has_time ?? false,
+    account_hint: extracted.account_hint ?? null,
   };
+}
+
+function findAccountByHint(hint: string, accounts: GoogleAccount[]): GoogleAccount | null {
+  const h = hint.toLowerCase();
+  return (
+    accounts.find((a) => a.email.toLowerCase() === h) ??
+    accounts.find(
+      (a) => a.display_name.toLowerCase().includes(h) || a.email.toLowerCase().includes(h),
+    ) ??
+    null
+  );
+}
+
+function buildAccountSelectionMessage(accounts: GoogleAccount[], pendingTitle: string): string {
+  const lines = [`📅 Em qual conta criar o evento *"${pendingTitle}"*?`, ''];
+  accounts.forEach((a, i) => {
+    const name = a.display_name || a.email;
+    lines.push(`*${i + 1}.* ${name}`);
+    lines.push(`   📧 ${a.email}`);
+  });
+  lines.push('');
+  lines.push('_Responda com *conta 1*, *conta 2*, etc._');
+  return lines.join('\n').trim();
 }
 
 // ---------------------------------------------------------------------------
@@ -334,11 +363,27 @@ export async function listTodayEventsForPhone(_phone: string): Promise<string> {
   return formatEventsForWhatsApp(allEvents, accounts.length);
 }
 
-export async function createEventForPhone(_phone: string, message: string): Promise<string> {
+async function doCreateEvent(account: GoogleAccount, extracted: ExtractedEvent, accountCount: number): Promise<string> {
+  const startLocal = new Date(`${extracted.date}T${extracted.time}:00`);
+  const endLocal = new Date(startLocal.getTime() + extracted.duration_minutes * 60_000);
+  try {
+    const event = await createEvent(account, {
+      title: extracted.title,
+      description: extracted.description,
+      startDateTime: startLocal,
+      endDateTime: endLocal,
+    });
+    const confirmation = formatEventCreatedConfirmation(event);
+    return accountCount > 1 ? `${confirmation}\n📧 ${account.email}` : confirmation;
+  } catch (err) {
+    console.error('[calendar] Error creating event:', (err as Error).message);
+    return '⚠️ Erro ao criar o evento no Google Agenda. Verifique se a conta está vinculada corretamente.';
+  }
+}
+
+export async function createEventForPhone(phone: string, message: string): Promise<string> {
   const accounts = getEnabledGoogleAccounts();
   if (accounts.length === 0) return NO_ACCOUNTS_MSG;
-
-  const account = accounts[0]; // use primary (first) account
 
   let extracted: ExtractedEvent;
   try {
@@ -354,22 +399,57 @@ export async function createEventForPhone(_phone: string, message: string): Prom
     return '🕐 Por favor informe o *horário* do evento.\nEx: "agendar reunião amanhã às 14h"';
   }
 
-  // Build Date objects in BRT
-  const startLocal = new Date(`${extracted.date}T${extracted.time}:00`);
-  const endLocal = new Date(startLocal.getTime() + extracted.duration_minutes * 60_000);
-
-  try {
-    const event = await createEvent(account, {
-      title: extracted.title,
-      description: extracted.description,
-      startDateTime: startLocal,
-      endDateTime: endLocal,
-    });
-    return formatEventCreatedConfirmation(event);
-  } catch (err) {
-    console.error('[calendar] Error creating event:', (err as Error).message);
-    return '⚠️ Erro ao criar o evento no Google Agenda. Verifique se a conta está vinculada corretamente.';
+  // Single account — create directly
+  if (accounts.length === 1) {
+    return doCreateEvent(accounts[0], extracted, 1);
   }
+
+  // Multiple accounts — check if user specified one in the message
+  if (extracted.account_hint) {
+    const matched = findAccountByHint(extracted.account_hint, accounts);
+    if (matched) return doCreateEvent(matched, extracted, accounts.length);
+  }
+
+  // Multiple accounts, no hint — ask the user
+  savePendingAction(phone, 'create_calendar_event', extracted);
+  return buildAccountSelectionMessage(accounts, extracted.title);
+}
+
+export async function completePendingCalendarEvent(phone: string, accountIndex: number): Promise<string> {
+  const pending = getPendingAction(phone);
+  if (!pending || pending.action_type !== 'create_calendar_event') {
+    return '⚠️ Nenhum evento pendente encontrado. Envie o comando de agendamento novamente.';
+  }
+
+  const accounts = getEnabledGoogleAccounts();
+  if (accountIndex < 0 || accountIndex >= accounts.length) {
+    return `⚠️ Conta inválida. Responda com *conta 1* a *conta ${accounts.length}*.`;
+  }
+
+  const extracted = JSON.parse(pending.payload) as ExtractedEvent;
+  clearPendingAction(phone);
+  return doCreateEvent(accounts[accountIndex], extracted, accounts.length);
+}
+
+export function listLinkedAccounts(phone?: string): string {
+  const accounts = getEnabledGoogleAccounts();
+  if (accounts.length === 0) return NO_ACCOUNTS_MSG;
+
+  const hasPending = phone ? getPendingAction(phone)?.action_type === 'create_calendar_event' : false;
+  const lines = ['📋 *Contas Google vinculadas:*', ''];
+  accounts.forEach((a, i) => {
+    const name = a.display_name || a.email;
+    lines.push(`*${i + 1}.* ${name}`);
+    lines.push(`   📧 ${a.email}`);
+    lines.push('');
+  });
+  if (hasPending) {
+    lines.push('_Responda *conta 1* ou *conta 2* para escolher onde criar o evento pendente._');
+  } else {
+    lines.push('_Para criar evento em uma conta específica, mencione o nome na mensagem._');
+    lines.push('_Ex: "agendar reunião de trabalho amanhã às 14h"_');
+  }
+  return lines.join('\n').trim();
 }
 
 // ---------------------------------------------------------------------------

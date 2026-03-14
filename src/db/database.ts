@@ -95,6 +95,14 @@ export function initDb(): Database.Database {
       value      TEXT NOT NULL,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    -- Pending multi-step actions (e.g. calendar event awaiting account selection)
+    CREATE TABLE IF NOT EXISTS pending_actions (
+      phone       TEXT    PRIMARY KEY,
+      action_type TEXT    NOT NULL,
+      payload     TEXT    NOT NULL,
+      created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
   // Migration: add notified column if it doesn't exist yet
@@ -487,6 +495,35 @@ export function setPollState(key: string, value: string): void {
     )
     .run(key, value);
 }
+
+// ---------------------------------------------------------------------------
+// Pending actions (multi-step interactions)
+// ---------------------------------------------------------------------------
+
+export function savePendingAction(phone: string, actionType: string, payload: object): void {
+  getDb()
+    .prepare(
+      `INSERT INTO pending_actions (phone, action_type, payload, created_at)
+       VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+       ON CONFLICT(phone) DO UPDATE SET action_type = excluded.action_type,
+         payload = excluded.payload, created_at = excluded.created_at`,
+    )
+    .run(phone, actionType, JSON.stringify(payload));
+}
+
+export function getPendingAction(phone: string): { action_type: string; payload: string } | null {
+  return getDb()
+    .prepare(`SELECT action_type, payload FROM pending_actions WHERE phone = ?`)
+    .get(phone) as { action_type: string; payload: string } | null;
+}
+
+export function clearPendingAction(phone: string): void {
+  getDb().prepare(`DELETE FROM pending_actions WHERE phone = ?`).run(phone);
+}
+
+// ---------------------------------------------------------------------------
+// Conversation memory
+// ---------------------------------------------------------------------------
 
 export function pruneMemory(phone: string, keep = 10): void {
   getDb()
