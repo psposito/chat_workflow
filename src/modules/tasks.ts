@@ -88,10 +88,13 @@ function buildConfirmation(task: Task): string {
 // removeTask / removeAllTasks
 // ---------------------------------------------------------------------------
 
-export function removeTask(phone: string, id: number): string {
-  const removed = deleteTask(phone, id);
-  if (removed) return `✅ Tarefa #${id} excluída com sucesso.`;
-  return `⚠️ Tarefa #${id} não encontrada ou não pertence a você.`;
+export function removeTask(phone: string, displayIndex: number): string {
+  const tasks = listPendingTasks(phone);
+  const task = tasks[displayIndex - 1];
+  if (!task) return `⚠️ Tarefa #${displayIndex} não encontrada. Use *minhas tarefas* para ver a lista atual.`;
+  const removed = deleteTask(phone, task.id);
+  if (removed) return `✅ Tarefa #${displayIndex} "${task.title}" excluída.`;
+  return `⚠️ Não foi possível excluir a tarefa #${displayIndex}.`;
 }
 
 export function removeAllTasks(phone: string): string {
