@@ -83,14 +83,12 @@ export interface NewEventDetails {
 
 function dayBounds(tz: string): { start: Date; end: Date } {
   const now = new Date();
-  const dateStr = now.toLocaleDateString('en-CA', { timeZone: tz }); // YYYY-MM-DD
-  const start = new Date(`${dateStr}T00:00:00`);
-  const end = new Date(`${dateStr}T23:59:59`);
-  // Adjust for timezone offset
-  const offsetMs = now.getTimezoneOffset() * 60_000;
+  const dateStr = now.toLocaleDateString('en-CA', { timeZone: tz }); // YYYY-MM-DD in BRT
+  // America/Sao_Paulo is always UTC-3 (no DST since 2019).
+  // Use explicit offset so the boundary is correct regardless of server timezone.
   return {
-    start: new Date(start.getTime() + offsetMs),
-    end: new Date(end.getTime() + offsetMs),
+    start: new Date(`${dateStr}T00:00:00-03:00`),
+    end: new Date(`${dateStr}T23:59:59-03:00`),
   };
 }
 
