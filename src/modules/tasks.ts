@@ -42,7 +42,7 @@ export async function extractAndSaveTask(
 - has_date: boolean
 - has_time: boolean
 
-Considere a data de hoje como ${new Date().toISOString().slice(0, 10)}.
+Considere a data de hoje como ${new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' })}.
 Interprete expressões como "amanhã", "segunda-feira", "próxima semana", etc.
 Retorne apenas o JSON, sem texto adicional.`,
       },

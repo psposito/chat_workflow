@@ -214,7 +214,7 @@ interface ExtractedEvent {
 }
 
 async function extractEventFromMessage(message: string): Promise<ExtractedEvent> {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: TZ }); // YYYY-MM-DD in BRT
   const completion = await getOpenAI().chat.completions.create({
     model: 'gpt-4o-mini',
     response_format: { type: 'json_object' },
@@ -380,7 +380,7 @@ export async function listTodayEventsForPhone(_phone: string): Promise<string> {
 }
 
 async function doCreateEvent(account: GoogleAccount, extracted: ExtractedEvent, accountCount: number): Promise<string> {
-  const startLocal = new Date(`${extracted.date}T${extracted.time}:00`);
+  const startLocal = new Date(`${extracted.date}T${extracted.time}:00-03:00`); // BRT = UTC-3
   const endLocal = new Date(startLocal.getTime() + extracted.duration_minutes * 60_000);
   try {
     const event = await createEvent(account, {
