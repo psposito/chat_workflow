@@ -5,6 +5,7 @@ import { runSeoRadar } from '../modules/seoRadar';
 import { fetchNewImportantEmails, formatEmailsForWhatsApp, persistNotificationBatch } from '../modules/gmail';
 import { checkAndSendCalendarReminders } from '../modules/googleCalendar';
 import { notify } from '../notifier';
+import { getConnectedPhones } from '../chatNotifier';
 
 const TZ = 'America/Sao_Paulo';
 
@@ -25,7 +26,7 @@ async function runDailyReminder(): Promise<void> {
   const sends = Array.from(tasksByPhone.entries()).map(async ([phone, _tasks]) => {
     const message = `🔔 *Lembretes de hoje!*\n\n${listTasks(phone)}`;
     try {
-      await notify(phone.replace('whatsapp:', ''), message);
+      await notify(phone,message);
       console.log(`[jobs] Reminder sent to ${phone}`);
     } catch (err) {
       console.error(`[jobs] Failed to send reminder to ${phone}:`, (err as Error).message);
@@ -46,12 +47,24 @@ function getNotifyPhones(): string[] {
     .filter(Boolean);
 }
 
+/**
+ * Merge NOTIFY_PHONES env var with any phones currently connected via the
+ * web chat SSE stream, so broadcast notifications (calendar, Gmail, SEO)
+ * also reach the browser without requiring the phone to be in the env var.
+ */
+function getAllNotifyPhones(): string[] {
+  const envPhones = getNotifyPhones().map((p) => p.replace('whatsapp:', ''));
+  const ssePhones = getConnectedPhones(); // already normalized
+  const all = new Set([...envPhones, ...ssePhones]);
+  return Array.from(all);
+}
+
 async function runWeeklySeoDigest(): Promise<void> {
   console.log('[jobs] Running weekly SEO digest…');
 
-  const phones = getNotifyPhones();
+  const phones = getAllNotifyPhones();
   if (phones.length === 0) {
-    console.warn('[jobs] NOTIFY_PHONES is empty — skipping SEO digest.');
+    console.warn('[jobs] No notify phones (env + SSE) — skipping SEO digest.');
     return;
   }
 
@@ -65,7 +78,7 @@ async function runWeeklySeoDigest(): Promise<void> {
 
   const sends = phones.map(async (phone) => {
     try {
-      await notify(phone.replace('whatsapp:', ''), digest);
+      await notify(phone,digest);
       console.log(`[jobs] SEO digest sent to ${phone}`);
     } catch (err) {
       console.error(`[jobs] Failed to send SEO digest to ${phone}:`, (err as Error).message);
@@ -109,7 +122,7 @@ async function runDueTimeAlerts(): Promise<void> {
     lines.push(`🕐 Agora — ${time}`);
 
     try {
-      await notify(task.phone.replace('whatsapp:', ''), lines.join('\n'));
+      await notify(task.phone,lines.join('\n'));
       markTaskNotified(task.id);
       console.log(`[jobs] Due-time alert sent to ${task.phone} for task #${task.id}`);
     } catch (err) {
@@ -125,9 +138,9 @@ async function runDueTimeAlerts(): Promise<void> {
 async function runGmailPoll(): Promise<void> {
   console.log('[jobs] Polling Gmail for important emails…');
 
-  const phones = getNotifyPhones();
+  const phones = getAllNotifyPhones();
   if (phones.length === 0) {
-    console.warn('[jobs] NOTIFY_PHONES is empty — skipping Gmail poll.');
+    console.warn('[jobs] No notify phones (env + SSE) — skipping Gmail poll.');
     return;
   }
 
@@ -149,7 +162,7 @@ async function runGmailPoll(): Promise<void> {
   const message = formatEmailsForWhatsApp(emails);
   for (const phone of phones) {
     try {
-      await notify(phone.replace('whatsapp:', ''), message);
+      await notify(phone,message);
       persistNotificationBatch(phone, emails);
       console.log(`[jobs] Gmail notification sent to ${phone}`);
     } catch (err) {
@@ -163,7 +176,7 @@ async function runGmailPoll(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function runCalendarReminders(): Promise<void> {
-  await checkAndSendCalendarReminders(getNotifyPhones(), notify);
+  await checkAndSendCalendarReminders(getAllNotifyPhones(), notify);
 }
 
 export async function triggerSeoDigest(): Promise<void> {
@@ -183,11 +196,11 @@ export interface GmailPollResult {
 }
 
 export async function triggerGmailPoll(): Promise<GmailPollResult> {
-  const phones = getNotifyPhones();
+  const phones = getAllNotifyPhones();
   const errors: string[] = [];
 
   if (phones.length === 0) {
-    return { phones, emailsScanned: 0, emailsImportant: 0, emailsSent: 0, errors: ['NOTIFY_PHONES is empty'] };
+    return { phones, emailsScanned: 0, emailsImportant: 0, emailsSent: 0, errors: ['No notify phones (env + SSE)'] };
   }
 
   let fetchResult;
@@ -207,7 +220,7 @@ export async function triggerGmailPoll(): Promise<GmailPollResult> {
   let emailsSent = 0;
   for (const phone of phones) {
     try {
-      await notify(phone.replace('whatsapp:', ''), message);
+      await notify(phone,message);
       persistNotificationBatch(phone, emails);
       emailsSent++;
     } catch (err) {

@@ -535,7 +535,7 @@ export async function checkAndSendCalendarReminders(
 
       for (const phone of notifyPhones) {
         try {
-          await sendFn(phone.replace('whatsapp:', ''), message);
+          await sendFn(phone, message);
         } catch (err) {
           console.error(`[calendar] Failed to send reminder to ${phone}:`, (err as Error).message);
         }
