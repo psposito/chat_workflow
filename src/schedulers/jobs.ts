@@ -4,7 +4,7 @@ import { listTasks } from '../modules/tasks';
 import { runSeoRadar } from '../modules/seoRadar';
 import { fetchNewImportantEmails, formatEmailsForWhatsApp, persistNotificationBatch } from '../modules/gmail';
 import { checkAndSendCalendarReminders } from '../modules/googleCalendar';
-import { sendWhatsApp } from '../twilio';
+import { notify } from '../notifier';
 
 const TZ = 'America/Sao_Paulo';
 
@@ -25,7 +25,7 @@ async function runDailyReminder(): Promise<void> {
   const sends = Array.from(tasksByPhone.entries()).map(async ([phone, _tasks]) => {
     const message = `🔔 *Lembretes de hoje!*\n\n${listTasks(phone)}`;
     try {
-      await sendWhatsApp(phone.replace('whatsapp:', ''), message);
+      await notify(phone.replace('whatsapp:', ''), message);
       console.log(`[jobs] Reminder sent to ${phone}`);
     } catch (err) {
       console.error(`[jobs] Failed to send reminder to ${phone}:`, (err as Error).message);
@@ -65,7 +65,7 @@ async function runWeeklySeoDigest(): Promise<void> {
 
   const sends = phones.map(async (phone) => {
     try {
-      await sendWhatsApp(phone.replace('whatsapp:', ''), digest);
+      await notify(phone.replace('whatsapp:', ''), digest);
       console.log(`[jobs] SEO digest sent to ${phone}`);
     } catch (err) {
       console.error(`[jobs] Failed to send SEO digest to ${phone}:`, (err as Error).message);
@@ -109,7 +109,7 @@ async function runDueTimeAlerts(): Promise<void> {
     lines.push(`🕐 Agora — ${time}`);
 
     try {
-      await sendWhatsApp(task.phone.replace('whatsapp:', ''), lines.join('\n'));
+      await notify(task.phone.replace('whatsapp:', ''), lines.join('\n'));
       markTaskNotified(task.id);
       console.log(`[jobs] Due-time alert sent to ${task.phone} for task #${task.id}`);
     } catch (err) {
@@ -149,7 +149,7 @@ async function runGmailPoll(): Promise<void> {
   const message = formatEmailsForWhatsApp(emails);
   for (const phone of phones) {
     try {
-      await sendWhatsApp(phone.replace('whatsapp:', ''), message);
+      await notify(phone.replace('whatsapp:', ''), message);
       persistNotificationBatch(phone, emails);
       console.log(`[jobs] Gmail notification sent to ${phone}`);
     } catch (err) {
@@ -163,7 +163,7 @@ async function runGmailPoll(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function runCalendarReminders(): Promise<void> {
-  await checkAndSendCalendarReminders(getNotifyPhones(), sendWhatsApp);
+  await checkAndSendCalendarReminders(getNotifyPhones(), notify);
 }
 
 export async function triggerSeoDigest(): Promise<void> {
@@ -207,7 +207,7 @@ export async function triggerGmailPoll(): Promise<GmailPollResult> {
   let emailsSent = 0;
   for (const phone of phones) {
     try {
-      await sendWhatsApp(phone.replace('whatsapp:', ''), message);
+      await notify(phone.replace('whatsapp:', ''), message);
       persistNotificationBatch(phone, emails);
       emailsSent++;
     } catch (err) {

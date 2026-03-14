@@ -5,6 +5,7 @@ import { initDb, upsertGoogleAccount, getEnabledGoogleAccounts, getDb } from './
 import { router } from './router';
 import { startJobs, triggerSeoDigest, triggerDueTimeAlerts, triggerGmailPoll, triggerCalendarReminders } from './schedulers/jobs';
 import { sendWhatsApp } from './twilio';
+import { subscribeNotifications } from './chatNotifier';
 
 const TWIML_MAX = 1500;
 
@@ -186,6 +187,37 @@ app.post('/chat/message', async (req: Request, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /chat/events — SSE stream for push notifications to the web chat UI
+// ---------------------------------------------------------------------------
+
+app.get('/chat/events', (req: Request, res: Response) => {
+  const secret = process.env.CHAT_SECRET;
+  if (secret && req.headers['x-chat-secret'] !== secret && req.query.secret !== secret) {
+    res.status(401).end();
+    return;
+  }
+
+  const phone: string = (req.query.phone as string) || 'whatsapp:+5500000000000';
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  // Keepalive ping every 25s to prevent proxy/Railway from closing idle connections
+  const heartbeat = setInterval(() => res.write(': ping\n\n'), 25_000);
+
+  const unsubscribe = subscribeNotifications(phone, (text) => {
+    res.write(`data: ${JSON.stringify({ text })}\n\n`);
+  });
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    unsubscribe();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /chat — chat test UI
 // ---------------------------------------------------------------------------
 
@@ -279,6 +311,30 @@ async function send() {
 btn.addEventListener('click', send);
 input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }});
 input.focus();
+
+// ── SSE: receive push notifications (task/calendar alerts) ──────────────────
+let evtSource = null;
+
+function connectSSE() {
+  if (evtSource) evtSource.close();
+  const phone = phoneInput.value.trim() || 'whatsapp:+5500000000000';
+  const qs = new URLSearchParams({ phone });
+  if (SECRET) qs.set('secret', SECRET);
+  evtSource = new EventSource('/chat/events?' + qs.toString());
+  evtSource.onmessage = (e) => {
+    try {
+      const { text } = JSON.parse(e.data);
+      addBubble('🔔 ' + text, 'bot');
+    } catch (_) {}
+  };
+  evtSource.onerror = () => {
+    // Auto-reconnect is handled by EventSource; no action needed
+  };
+}
+
+connectSSE();
+// Reconnect when the phone number is changed
+phoneInput.addEventListener('change', connectSSE);
 </script>
 </body>
 </html>`;
