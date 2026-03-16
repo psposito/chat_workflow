@@ -352,13 +352,13 @@ let unreadCount = 0;
 function fmt(text) {
   return text
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    .replace(/\`\`\`([\s\S]*?)\`\`\`/g, '<code>$1</code>')
-    .replace(/\*(.*?)\*/g, '<b>$1</b>')
+    .replace(/\`\`\`([\\s\\S]*?)\`\`\`/g, '<code>$1</code>')
+    .replace(/\\*(.*?)\\*/g, '<b>$1</b>')
     .replace(/_(.*?)_/g, '<em>$1</em>')
     .replace(/~(.*?)~/g, '<s>$1</s>')
-    .replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank">$1</a>')
-    .replace(/^[ \t]*[•\-] (.+)$/gm, '<li>$1</li>')
-    .replace(/(<li>.*<\/li>\n?)+/g, (m) => '<ul>' + m + '</ul>');
+    .replace(/(https?:\\/\\/[^\\s]+)/g, '<a href="$1" target="_blank">$1</a>')
+    .replace(/^[ \\t]*[•\\-] (.+)$/gm, '<li>$1</li>')
+    .replace(/(<li>.*<\\/li>\\n?)+/g, (m) => '<ul>' + m + '</ul>');
 }
 
 function addBubble(text, side, extra) {
