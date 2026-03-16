@@ -11,9 +11,10 @@ export interface DigestItem {
   link: string;
   summary: string;
   source: string;
+  pubDate?: Date | null;
 }
 
-export async function buildSeoDigest(items: DigestItem[]): Promise<string> {
+export async function buildSeoDigest(items: DigestItem[], filter?: string): Promise<string> {
   if (items.length === 0) return '📭 Nenhum item para o digest.';
 
   const itemsText = items
@@ -22,6 +23,10 @@ export async function buildSeoDigest(items: DigestItem[]): Promise<string> {
         `${i + 1}. [${item.source}] ${item.title}\n   ${item.summary}\n   ${item.link}`,
     )
     .join('\n\n');
+
+  const filterNote = filter
+    ? `\n\nIMPORTANTE: Filtre e foque APENAS em artigos sobre: "${filter}". Ignore itens não relacionados.`
+    : '';
 
   const completion = await getOpenAI().chat.completions.create({
     model: 'gpt-4o-mini',
@@ -36,7 +41,7 @@ Formato de saída:
 - Inclua o link ao final de cada bullet entre parênteses
 - Seja conciso e direto, destacando o que é mais relevante para profissionais de SEO
 - Máximo de 20 linhas no total
-- Use emojis para os títulos de categoria`,
+- Use emojis para os títulos de categoria${filterNote}`,
       },
       {
         role: 'user',

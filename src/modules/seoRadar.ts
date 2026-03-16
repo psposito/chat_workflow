@@ -13,14 +13,13 @@ const HEADERS = {
 };
 
 async function fetchXml(url: string): Promise<string> {
-  const res = await axios.get<string>(url, { headers: HEADERS, timeout: 10_000 });
+  const res = await axios.get<string>(url, { headers: HEADERS, timeout: 12_000 });
   return res.data;
 }
 
 async function parseRss(xml: string, sourceName: string): Promise<DigestItem[]> {
   const parsed = await xml2js.parseStringPromise(xml, { explicitArray: false });
 
-  // Support both RSS 2.0 (<rss>) and Atom (<feed>)
   const channel = parsed?.rss?.channel ?? parsed?.feed;
   if (!channel) return [];
 
@@ -28,7 +27,7 @@ async function parseRss(xml: string, sourceName: string): Promise<DigestItem[]> 
     ? (channel.item ?? channel.entry)
     : [channel.item ?? channel.entry].filter(Boolean);
 
-  return rawItems.slice(0, 10).map((raw: unknown) => {
+  return rawItems.slice(0, 8).map((raw: unknown) => {
     const item = raw as Record<string, unknown>;
     const title = String(item.title ?? '').trim();
     const atomLink = (item as Record<string, Record<string, Record<string, string>>>)['link']?.['$']?.href;
@@ -40,12 +39,16 @@ async function parseRss(xml: string, sourceName: string): Promise<DigestItem[]> 
       .slice(0, 200)
       .trim();
 
-    return { title, link, summary, source: sourceName };
+    // Extract publish date to filter by recency
+    const pubDateRaw = String(item.pubDate ?? item.published ?? item.updated ?? '');
+    const pubDate = pubDateRaw ? new Date(pubDateRaw) : null;
+
+    return { title, link, summary, source: sourceName, pubDate };
   });
 }
 
 // ---------------------------------------------------------------------------
-// Source 1 & 3: RSS feeds
+// RSS feed fetcher (generic)
 // ---------------------------------------------------------------------------
 
 async function fetchRssFeed(url: string, source: string): Promise<DigestItem[]> {
@@ -59,7 +62,7 @@ async function fetchRssFeed(url: string, source: string): Promise<DigestItem[]> 
 }
 
 // ---------------------------------------------------------------------------
-// Source 2: Search Engine Land (HTML scrape via cheerio)
+// Search Engine Land — HTML scrape fallback
 // ---------------------------------------------------------------------------
 
 async function fetchSearchEngineLand(): Promise<DigestItem[]> {
@@ -71,7 +74,6 @@ async function fetchSearchEngineLand(): Promise<DigestItem[]> {
     const $ = cheerio.load(res.data);
     const items: DigestItem[] = [];
 
-    // Article cards on the homepage
     $('article').each((_i, el) => {
       const titleEl = $(el).find('h2 a, h3 a').first();
       const title = titleEl.text().trim();
@@ -83,7 +85,7 @@ async function fetchSearchEngineLand(): Promise<DigestItem[]> {
       }
     });
 
-    return items.slice(0, 10);
+    return items.slice(0, 8);
   } catch (err) {
     console.warn('[seoRadar] searchengineland.com scrape failed:', (err as Error).message);
     return [];
@@ -91,13 +93,13 @@ async function fetchSearchEngineLand(): Promise<DigestItem[]> {
 }
 
 // ---------------------------------------------------------------------------
-// Deduplicate by URL
+// Deduplicate by URL (ignore query params)
 // ---------------------------------------------------------------------------
 
 function deduplicate(items: DigestItem[]): DigestItem[] {
   const seen = new Set<string>();
   return items.filter((item) => {
-    const key = item.link.split('?')[0]; // ignore query params
+    const key = item.link.split('?')[0];
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -105,28 +107,55 @@ function deduplicate(items: DigestItem[]): DigestItem[] {
 }
 
 // ---------------------------------------------------------------------------
+// Filter by recency — prefer items from the last 7 days
+// ---------------------------------------------------------------------------
+
+function sortByRecency(items: (DigestItem & { pubDate?: Date | null })[]): DigestItem[] {
+  const now = Date.now();
+  const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+
+  return [...items].sort((a, b) => {
+    // Items with recent pub date first
+    const aDate = a.pubDate?.getTime() ?? 0;
+    const bDate = b.pubDate?.getTime() ?? 0;
+    const aRecent = now - aDate < sevenDaysMs;
+    const bRecent = now - bDate < sevenDaysMs;
+
+    if (aRecent && !bRecent) return -1;
+    if (!aRecent && bRecent) return 1;
+    return bDate - aDate; // newer first
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
 
-export async function runSeoRadar(): Promise<string> {
-  const [sel, semrush, neilpatel, searchEngineLand] =
-    await Promise.allSettled([
-      fetchRssFeed('https://feeds.feedburner.com/SearchEngineLand', 'Search Engine Land'),
-      fetchRssFeed('https://www.semrush.com/blog/feed/', 'Semrush Blog'),
-      fetchRssFeed('https://neilpatel.com/blog/feed/', 'Neil Patel'),
-      fetchSearchEngineLand(),
-    ]);
-
-  const all: DigestItem[] = [
-    ...(sel.status === 'fulfilled' ? sel.value : []),
-    ...(semrush.status === 'fulfilled' ? semrush.value : []),
-    ...(neilpatel.status === 'fulfilled' ? neilpatel.value : []),
-    ...(searchEngineLand.status === 'fulfilled' ? searchEngineLand.value : []),
+export async function runSeoRadar(filter?: string): Promise<string> {
+  const feeds: [string, string][] = [
+    ['https://feeds.feedburner.com/SearchEngineLand', 'Search Engine Land'],
+    ['https://www.semrush.com/blog/feed/', 'Semrush Blog'],
+    ['https://neilpatel.com/blog/feed/', 'Neil Patel'],
+    ['https://ahrefs.com/blog/feed/', 'Ahrefs Blog'],
+    ['https://moz.com/blog/feed', 'Moz Blog'],
+    ['https://www.searchenginejournal.com/feed/', 'Search Engine Journal'],
+    ['https://developers.google.com/search/blog/feeds/posts/default', 'Google Search Central'],
   ];
 
-  const unique = deduplicate(all).slice(0, 10);
+  const results = await Promise.allSettled([
+    ...feeds.map(([url, source]) => fetchRssFeed(url, source)),
+    fetchSearchEngineLand(),
+  ]);
 
-  console.log(`[seoRadar] Collected ${all.length} items, ${unique.length} unique`);
+  const all: (DigestItem & { pubDate?: Date | null })[] = [];
+  for (const r of results) {
+    if (r.status === 'fulfilled') all.push(...(r.value as (DigestItem & { pubDate?: Date | null })[]));
+  }
 
-  return buildSeoDigest(unique);
+  const sorted = sortByRecency(all);
+  const unique = deduplicate(sorted).slice(0, 15);
+
+  console.log(`[seoRadar] Collected ${all.length} items, ${unique.length} unique (${feeds.length + 1} sources)`);
+
+  return buildSeoDigest(unique, filter);
 }

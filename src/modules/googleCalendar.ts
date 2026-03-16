@@ -11,7 +11,9 @@ import {
   savePendingAction,
   getPendingAction,
   clearPendingAction,
+  getUserPreferences,
 } from '../db/database';
+import { withRetry } from '../utils/retry';
 
 const TZ = 'America/Sao_Paulo';
 
@@ -41,7 +43,6 @@ function buildOAuth2Client(account: GoogleAccount): OAuth2Client {
     expiry_date: account.token_expiry ? new Date(account.token_expiry).getTime() : undefined,
   });
 
-  // Persist new access_token whenever googleapis performs a silent refresh
   client.on('tokens', (tokens) => {
     if (tokens.access_token) {
       const expiry = tokens.expiry_date
@@ -81,15 +82,20 @@ export interface NewEventDetails {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function dayBounds(tz: string): { start: Date; end: Date } {
+function dayBounds(tz: string, offsetDays = 0): { start: Date; end: Date } {
   const now = new Date();
-  const dateStr = now.toLocaleDateString('en-CA', { timeZone: tz }); // YYYY-MM-DD in BRT
-  // America/Sao_Paulo is always UTC-3 (no DST since 2019).
-  // Use explicit offset so the boundary is correct regardless of server timezone.
+  const baseDate = new Date(now.getTime() + offsetDays * 86_400_000);
+  const dateStr = baseDate.toLocaleDateString('en-CA', { timeZone: tz });
   return {
     start: new Date(`${dateStr}T00:00:00-03:00`),
     end: new Date(`${dateStr}T23:59:59-03:00`),
   };
+}
+
+function rangeBounds(tz: string, startOffsetDays: number, endOffsetDays: number): { start: Date; end: Date } {
+  const startBound = dayBounds(tz, startOffsetDays);
+  const endBound = dayBounds(tz, endOffsetDays);
+  return { start: startBound.start, end: endBound.end };
 }
 
 function parseGoogleEvent(item: any, accountEmail: string): CalendarEvent {
@@ -133,7 +139,7 @@ async function withTokenErrorHandling<T>(
 export async function listTodayEvents(account: GoogleAccount): Promise<CalendarEvent[]> {
   const auth = buildOAuth2Client(account);
   const cal = google.calendar({ version: 'v3', auth });
-  const { start, end } = dayBounds(TZ);
+  const { start, end } = dayBounds(TZ, 0);
 
   const result = await withTokenErrorHandling(account, () =>
     cal.events.list({
@@ -143,6 +149,28 @@ export async function listTodayEvents(account: GoogleAccount): Promise<CalendarE
       singleEvents: true,
       orderBy: 'startTime',
       maxResults: 20,
+    }),
+  );
+
+  return (result?.data.items ?? []).map((item) => parseGoogleEvent(item, account.email));
+}
+
+export async function listEventsInRange(
+  account: GoogleAccount,
+  startDate: Date,
+  endDate: Date,
+): Promise<CalendarEvent[]> {
+  const auth = buildOAuth2Client(account);
+  const cal = google.calendar({ version: 'v3', auth });
+
+  const result = await withTokenErrorHandling(account, () =>
+    cal.events.list({
+      calendarId: 'primary',
+      timeMin: startDate.toISOString(),
+      timeMax: endDate.toISOString(),
+      singleEvents: true,
+      orderBy: 'startTime',
+      maxResults: 50,
     }),
   );
 
@@ -171,7 +199,7 @@ export async function listUpcomingEvents(
   );
 
   return (result?.data.items ?? [])
-    .filter((item) => item.start?.dateTime) // only timed events, not all-day
+    .filter((item) => item.start?.dateTime)
     .map((item) => parseGoogleEvent(item, account.email));
 }
 
@@ -182,59 +210,70 @@ export async function createEvent(
   const auth = buildOAuth2Client(account);
   const cal = google.calendar({ version: 'v3', auth });
 
-  const response = await cal.events.insert({
-    calendarId: 'primary',
-    requestBody: {
-      summary: details.title,
-      description: details.description,
-      location: details.location,
-      start: { dateTime: details.startDateTime.toISOString(), timeZone: TZ },
-      end: { dateTime: details.endDateTime.toISOString(), timeZone: TZ },
-    },
-  });
+  const response = await withRetry(() =>
+    cal.events.insert({
+      calendarId: 'primary',
+      requestBody: {
+        summary: details.title,
+        description: details.description,
+        location: details.location,
+        start: { dateTime: details.startDateTime.toISOString(), timeZone: TZ },
+        end: { dateTime: details.endDateTime.toISOString(), timeZone: TZ },
+      },
+    }),
+  );
 
   return parseGoogleEvent(response.data, account.email);
 }
 
 // ---------------------------------------------------------------------------
-// AI event extraction (mirrors extractAndSaveTask in tasks.ts)
+// AI event extraction
 // ---------------------------------------------------------------------------
 
 interface ExtractedEvent {
   title: string;
   description: string;
-  date: string | null;       // YYYY-MM-DD
-  time: string | null;       // HH:MM (24h)
+  date: string | null;
+  time: string | null;
   duration_minutes: number;
   has_date: boolean;
   has_time: boolean;
-  account_hint: string | null; // account alias/email mentioned by user, or null
+  account_hint: string | null;
 }
 
 async function extractEventFromMessage(message: string): Promise<ExtractedEvent> {
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: TZ }); // YYYY-MM-DD in BRT
-  const completion = await getOpenAI().chat.completions.create({
-    model: 'gpt-4o-mini',
-    response_format: { type: 'json_object' },
-    messages: [
-      {
-        role: 'system',
-        content: `Você é um extrator de eventos de calendário. A partir da mensagem do usuário, extraia as informações e retorne JSON com exatamente estes campos:
-- title: string (título do evento)
-- description: string (detalhes, pode ser vazio)
-- date: string | null (formato YYYY-MM-DD, ou null)
-- time: string | null (formato HH:MM 24h, ou null)
-- duration_minutes: number (duração em minutos, padrão 60 se não mencionado)
-- has_date: boolean
-- has_time: boolean
-- account_hint: string | null (alias ou e-mail de conta mencionado, ex: "trabalho", "pessoal", ou null se não mencionado)
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: TZ });
+  const tomorrow = new Date(Date.now() + 86_400_000).toLocaleDateString('en-CA', { timeZone: TZ });
+  const currentTime = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: TZ });
 
-Hoje é ${today}. Interprete "amanhã", "próxima segunda", "daqui a 3 dias", etc.
-Retorne apenas o JSON, sem texto adicional.`,
-      },
-      { role: 'user', content: message },
-    ],
-  });
+  const completion = await withRetry(() =>
+    getOpenAI().chat.completions.create({
+      model: 'gpt-4o-mini',
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content: `Extraia detalhes de evento de calendário. Retorne JSON:
+{
+  "title": "string",
+  "description": "string ou ''",
+  "date": "YYYY-MM-DD ou null",
+  "time": "HH:MM 24h ou null",
+  "duration_minutes": número (60 padrão; reunião=60, almoço=90, café=30),
+  "has_date": boolean,
+  "has_time": boolean,
+  "account_hint": "alias/email de conta ou null"
+}
+
+Hoje: ${today}. Amanhã: ${tomorrow}. Hora atual: ${currentTime}.
+Interprete "amanhã", "próxima segunda", "sexta", "daqui 2 horas" etc.
+Retorne apenas JSON, sem texto.`,
+        },
+        { role: 'user', content: message.slice(0, 1000) },
+      ],
+    }),
+  );
 
   const raw = completion.choices[0]?.message?.content ?? '{}';
   const extracted = JSON.parse(raw) as ExtractedEvent;
@@ -270,11 +309,10 @@ function buildMissingInfoQuestion(partial: ExtractedEvent): string {
     const time = partial.time ?? '';
     return `📅 Qual é a *data* de ${title}${time ? ` às ${time}` : ''}?\n_Ex: amanhã, sexta-feira, 20/03_`;
   }
-  // !has_time
   const dateStr = partial.date
     ? new Date(`${partial.date}T12:00:00`).toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: '2-digit', timeZone: TZ })
     : '';
-  return `🕐 Qual é o *horário* de ${title}${dateStr ? ` em ${dateStr}` : ''}?\n_Ex: às 14h, 10h30_`;
+  return `🕐 Qual é o *horário* de ${partial.title ? `*"${partial.title}"*` : 'o evento'}${dateStr ? ` em ${dateStr}` : ''}?\n_Ex: às 14h, 10h30_`;
 }
 
 function buildAccountSelectionMessage(accounts: GoogleAccount[], pendingTitle: string): string {
@@ -284,42 +322,52 @@ function buildAccountSelectionMessage(accounts: GoogleAccount[], pendingTitle: s
     lines.push(`*${i + 1}.* ${name}`);
     lines.push(`   📧 ${a.email}`);
   });
-  lines.push('');
-  lines.push('_Responda com *conta 1*, *conta 2*, etc._');
+  lines.push('', '_Responda com *conta 1*, *conta 2*, etc._');
   return lines.join('\n').trim();
 }
 
+function buildEventPreview(extracted: ExtractedEvent, account: GoogleAccount): string {
+  const startLocal = new Date(`${extracted.date}T${extracted.time}:00-03:00`);
+  const endLocal = new Date(startLocal.getTime() + extracted.duration_minutes * 60_000);
+  const dateStr = startLocal.toLocaleDateString('pt-BR', { weekday: 'long', day: '2-digit', month: '2-digit', timeZone: TZ });
+  const startTime = startLocal.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: TZ });
+  const endTime = endLocal.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: TZ });
+
+  const lines = [
+    `📅 *Criar evento?*`,
+    `📌 ${extracted.title}`,
+    `🗓 ${dateStr} — ${startTime} às ${endTime}`,
+  ];
+  if (extracted.description) lines.push(`📝 ${extracted.description}`);
+  lines.push(`👤 Conta: ${account.email}`);
+  lines.push('', '_Responda *sim* para confirmar ou *não* para cancelar._');
+  return lines.join('\n');
+}
+
 // ---------------------------------------------------------------------------
-// Format functions for WhatsApp
+// Format functions
 // ---------------------------------------------------------------------------
 
 function formatTime(date: Date): string {
-  return date.toLocaleTimeString('pt-BR', {
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZone: TZ,
-  });
+  return date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: TZ });
 }
 
 function formatDate(date: Date): string {
-  return date.toLocaleDateString('pt-BR', {
-    weekday: 'short',
-    day: '2-digit',
-    month: '2-digit',
-    timeZone: TZ,
-  });
+  return date.toLocaleDateString('pt-BR', { weekday: 'short', day: '2-digit', month: '2-digit', timeZone: TZ });
 }
 
-export function formatEventsForWhatsApp(events: CalendarEvent[], accountCount: number): string {
-  if (events.length === 0) return '📭 Nenhum evento hoje.';
+export function formatEventsForWhatsApp(events: CalendarEvent[], accountCount: number, title?: string): string {
+  if (events.length === 0) return '📭 Nenhum evento no período.';
 
-  const lines = [`📅 *Agenda de hoje — ${events.length} evento(s):*`, ''];
+  const header = title ?? `📅 *${events.length} evento(s):*`;
+  const lines = [header, ''];
+
   for (const e of events) {
     lines.push(`📌 *${e.title}*`);
     if (e.allDay) {
-      lines.push(`   🗓️ Dia inteiro`);
+      lines.push(`   🗓️ ${formatDate(e.start)} — Dia inteiro`);
     } else {
-      lines.push(`   🕐 ${formatTime(e.start)} – ${formatTime(e.end)}`);
+      lines.push(`   🕐 ${formatDate(e.start)} ${formatTime(e.start)} – ${formatTime(e.end)}`);
     }
     if (e.location) lines.push(`   📍 ${e.location}`);
     if (accountCount > 1) lines.push(`   📧 ${e.accountEmail}`);
@@ -356,7 +404,7 @@ export function formatCalendarReminder(event: CalendarEvent, minutesAhead: numbe
 // ---------------------------------------------------------------------------
 
 const NO_ACCOUNTS_MSG =
-  '⚠️ Nenhuma conta Google vinculada.\n\nAcesse pelo navegador para conectar:\n`https://<seu-dominio>/auth/google`';
+  '⚠️ Nenhuma conta Google vinculada.\n\nAcesse pelo navegador para conectar:\n`/auth/google`';
 
 export async function listTodayEventsForPhone(_phone: string): Promise<string> {
   const accounts = getEnabledGoogleAccounts();
@@ -372,13 +420,62 @@ export async function listTodayEventsForPhone(_phone: string): Promise<string> {
     }
   }
 
-  // Sort by start time
   allEvents.sort((a, b) => a.start.getTime() - b.start.getTime());
-  return formatEventsForWhatsApp(allEvents, accounts.length);
+
+  const todayStr = new Date().toLocaleDateString('pt-BR', {
+    weekday: 'long', day: '2-digit', month: 'long', timeZone: TZ,
+  });
+  return formatEventsForWhatsApp(allEvents, accounts.length, `📅 *Agenda de hoje (${todayStr}) — ${allEvents.length} evento(s):*`);
+}
+
+export async function listEventsForRangeForPhone(_phone: string, startOffsetDays: number, endOffsetDays: number): Promise<string> {
+  const accounts = getEnabledGoogleAccounts();
+  if (accounts.length === 0) return NO_ACCOUNTS_MSG;
+
+  const { start, end } = rangeBounds(TZ, startOffsetDays, endOffsetDays);
+
+  const allEvents: CalendarEvent[] = [];
+  for (const account of accounts) {
+    try {
+      const events = await listEventsInRange(account, start, end);
+      allEvents.push(...events);
+    } catch (err) {
+      console.error(`[calendar] Error fetching events for ${account.email}:`, (err as Error).message);
+    }
+  }
+
+  allEvents.sort((a, b) => a.start.getTime() - b.start.getTime());
+
+  let title: string;
+  if (startOffsetDays === 1 && endOffsetDays === 1) {
+    title = `📅 *Agenda de amanhã — ${allEvents.length} evento(s):*`;
+  } else {
+    const startStr = start.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', timeZone: TZ });
+    const endStr = end.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', timeZone: TZ });
+    title = `📅 *Agenda ${startStr}–${endStr} — ${allEvents.length} evento(s):*`;
+  }
+
+  return formatEventsForWhatsApp(allEvents, accounts.length, title);
+}
+
+/** Get today's events without formatting — used by myDay module */
+export async function getTodayEventsRaw(): Promise<CalendarEvent[]> {
+  const accounts = getEnabledGoogleAccounts();
+  if (accounts.length === 0) return [];
+
+  const allEvents: CalendarEvent[] = [];
+  for (const account of accounts) {
+    try {
+      const events = await listTodayEvents(account);
+      allEvents.push(...events);
+    } catch { /* non-fatal */ }
+  }
+  allEvents.sort((a, b) => a.start.getTime() - b.start.getTime());
+  return allEvents;
 }
 
 async function doCreateEvent(account: GoogleAccount, extracted: ExtractedEvent, accountCount: number): Promise<string> {
-  const startLocal = new Date(`${extracted.date}T${extracted.time}:00-03:00`); // BRT = UTC-3
+  const startLocal = new Date(`${extracted.date}T${extracted.time}:00-03:00`);
   const endLocal = new Date(startLocal.getTime() + extracted.duration_minutes * 60_000);
   try {
     const event = await createEvent(account, {
@@ -391,7 +488,7 @@ async function doCreateEvent(account: GoogleAccount, extracted: ExtractedEvent, 
     return accountCount > 1 ? `${confirmation}\n📧 ${account.email}` : confirmation;
   } catch (err) {
     console.error('[calendar] Error creating event:', (err as Error).message);
-    return '⚠️ Erro ao criar o evento no Google Agenda. Verifique se a conta está vinculada corretamente.';
+    return '⚠️ Erro ao criar o evento. Verifique se a conta está vinculada corretamente.';
   }
 }
 
@@ -411,20 +508,47 @@ export async function createEventForPhone(phone: string, message: string): Promi
     return buildMissingInfoQuestion(extracted);
   }
 
-  // Single account — create directly
+  // Single account — show confirmation preview
   if (accounts.length === 1) {
-    return doCreateEvent(accounts[0], extracted, 1);
+    savePendingAction(phone, 'confirm_calendar_event', { extracted, accountIndex: 0 });
+    return buildEventPreview(extracted, accounts[0]);
   }
 
-  // Multiple accounts — check if user specified one in the message
+  // Multiple accounts — check hint first
   if (extracted.account_hint) {
     const matched = findAccountByHint(extracted.account_hint, accounts);
-    if (matched) return doCreateEvent(matched, extracted, accounts.length);
+    if (matched) {
+      const accountIndex = accounts.indexOf(matched);
+      savePendingAction(phone, 'confirm_calendar_event', { extracted, accountIndex });
+      return buildEventPreview(extracted, matched);
+    }
   }
 
-  // Multiple accounts, no hint — ask the user
+  // Multiple accounts, no hint — ask which account
   savePendingAction(phone, 'create_calendar_event', extracted);
   return buildAccountSelectionMessage(accounts, extracted.title);
+}
+
+export async function confirmPendingCalendarEvent(phone: string): Promise<string> {
+  const pending = getPendingAction(phone);
+  if (!pending || pending.action_type !== 'confirm_calendar_event') {
+    return '⚠️ Nenhum evento aguardando confirmação.';
+  }
+
+  const { extracted, accountIndex } = JSON.parse(pending.payload) as { extracted: ExtractedEvent; accountIndex: number };
+  clearPendingAction(phone);
+
+  const accounts = getEnabledGoogleAccounts();
+  if (accountIndex < 0 || accountIndex >= accounts.length) {
+    return '⚠️ Conta não encontrada. Tente novamente.';
+  }
+
+  return doCreateEvent(accounts[accountIndex], extracted, accounts.length);
+}
+
+export async function cancelPendingCalendarEvent(phone: string): Promise<string> {
+  clearPendingAction(phone);
+  return '❌ Criação de evento cancelada.';
 }
 
 export async function completePendingCalendarEvent(phone: string, accountIndex: number): Promise<string> {
@@ -440,7 +564,11 @@ export async function completePendingCalendarEvent(phone: string, accountIndex: 
 
   const extracted = JSON.parse(pending.payload) as ExtractedEvent;
   clearPendingAction(phone);
-  return doCreateEvent(accounts[accountIndex], extracted, accounts.length);
+
+  // Show confirmation before creating
+  const account = accounts[accountIndex];
+  savePendingAction(phone, 'confirm_calendar_event', { extracted, accountIndex });
+  return buildEventPreview(extracted, account);
 }
 
 export async function completePendingCalendarInfo(phone: string, reply: string): Promise<string> {
@@ -449,7 +577,6 @@ export async function completePendingCalendarInfo(phone: string, reply: string):
 
   const partial = JSON.parse(pending.payload) as ExtractedEvent;
 
-  // Re-extract date/time from user's reply, merging into partial
   let update: ExtractedEvent;
   try {
     update = await extractEventFromMessage(`${partial.title}: ${reply}`);
@@ -475,11 +602,19 @@ export async function completePendingCalendarInfo(phone: string, reply: string):
 
   const accounts = getEnabledGoogleAccounts();
   if (accounts.length === 0) return NO_ACCOUNTS_MSG;
-  if (accounts.length === 1) return doCreateEvent(accounts[0], merged, 1);
+
+  if (accounts.length === 1) {
+    savePendingAction(phone, 'confirm_calendar_event', { extracted: merged, accountIndex: 0 });
+    return buildEventPreview(merged, accounts[0]);
+  }
 
   if (merged.account_hint) {
     const matched = findAccountByHint(merged.account_hint, accounts);
-    if (matched) return doCreateEvent(matched, merged, accounts.length);
+    if (matched) {
+      const accountIndex = accounts.indexOf(matched);
+      savePendingAction(phone, 'confirm_calendar_event', { extracted: merged, accountIndex });
+      return buildEventPreview(merged, matched);
+    }
   }
 
   savePendingAction(phone, 'create_calendar_event', merged);
@@ -508,7 +643,7 @@ export function listLinkedAccounts(phone?: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Cron job helper — used by jobs.ts
+// Cron job helper — calendar reminders
 // ---------------------------------------------------------------------------
 
 export async function checkAndSendCalendarReminders(
@@ -519,9 +654,19 @@ export async function checkAndSendCalendarReminders(
   if (accounts.length === 0) return;
 
   for (const account of accounts) {
+    // Use per-phone reminder minutes preference (use first phone's prefs as default)
+    const reminderMinutes = notifyPhones.length > 0
+      ? getUserPreferences(notifyPhones[0]).calendar_reminder_minutes
+      : 15;
+
+    // Skip if reminders are disabled
+    if (notifyPhones.length > 0 && !getUserPreferences(notifyPhones[0]).calendar_reminder_enabled) {
+      continue;
+    }
+
     let events: CalendarEvent[];
     try {
-      events = await listUpcomingEvents(account, 15);
+      events = await listUpcomingEvents(account, reminderMinutes);
     } catch (err) {
       console.error(`[calendar] Reminder check error for ${account.email}:`, (err as Error).message);
       continue;

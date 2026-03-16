@@ -15,12 +15,18 @@ import {
   disableGoogleAccount,
   getPollState,
   setPollState,
+  getUserPreferences,
+  logEmailFeedback,
+  getEmailClassificationStats,
   SenderReputation,
   GmailEmail,
   GoogleAccount,
   EmailCategory,
   EmailFeedback,
 } from '../db/database';
+import { withRetry } from '../utils/retry';
+
+const TZ = 'America/Sao_Paulo';
 
 // ---------------------------------------------------------------------------
 // OpenAI client
@@ -33,7 +39,7 @@ function getOpenAI(): OpenAI {
 }
 
 // ---------------------------------------------------------------------------
-// OAuth2 client factory (reuses same pattern as googleCalendar.ts)
+// OAuth2 client factory
 // ---------------------------------------------------------------------------
 
 function buildOAuth2Client(account: GoogleAccount): OAuth2Client {
@@ -61,7 +67,7 @@ function buildOAuth2Client(account: GoogleAccount): OAuth2Client {
 }
 
 // ---------------------------------------------------------------------------
-// Parse "From" header — extract email address from "Name <email>" or plain
+// Parse "From" header
 // ---------------------------------------------------------------------------
 
 function parseSender(fromHeader: string): string {
@@ -70,14 +76,38 @@ function parseSender(fromHeader: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Silent hours check
+// ---------------------------------------------------------------------------
+
+function isInSilentHours(phone: string, category: EmailCategory): boolean {
+  if (category === 'urgente') return false; // urgent always goes through
+
+  const prefs = getUserPreferences(phone);
+  const nowTime = new Date().toLocaleTimeString('en-GB', {
+    hour: '2-digit', minute: '2-digit', hour12: false, timeZone: TZ,
+  }); // HH:MM
+
+  const start = prefs.silent_start; // e.g. "22:00"
+  const end = prefs.silent_end;     // e.g. "07:00"
+
+  if (start <= end) {
+    return nowTime >= start && nowTime < end;
+  } else {
+    // Wraps midnight: 22:00-07:00
+    return nowTime >= start || nowTime < end;
+  }
+}
+
+function shouldNotifyCategory(phone: string, category: EmailCategory): boolean {
+  const prefs = getUserPreferences(phone);
+  const allowedCategories = prefs.email_notify_categories.split(',').map((c) => c.trim());
+  return allowedCategories.includes(category);
+}
+
+// ---------------------------------------------------------------------------
 // Scoring — reputation-based bypass + AI fallback
 // ---------------------------------------------------------------------------
 
-/**
- * Decision based purely on accumulated user feedback for this sender.
- * Returns 'important' or 'not_important' when we have enough data (≥3 signals,
- * ≥80% leaning one way). Returns null when uncertain → fall through to AI.
- */
 function reputationDecision(rep: SenderReputation | null): 'important' | 'not_important' | null {
   if (!rep) return null;
   const total = rep.important_count + rep.not_important_count;
@@ -88,45 +118,49 @@ function reputationDecision(rep: SenderReputation | null): 'important' | 'not_im
   return null;
 }
 
-/**
- * AI-based classification via GPT-4o-mini.
- * Returns one of 4 categories and a brief reason.
- */
 async function classifyWithAI(
   sender: string,
   subject: string,
   rep: SenderReputation | null,
 ): Promise<{ category: EmailCategory; reason: string }> {
-  let reputationCtx = '';
+  const now = new Date();
+  const dayOfWeek = now.toLocaleDateString('pt-BR', { weekday: 'long', timeZone: TZ });
+  const hour = now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: TZ });
+
+  let repCtx = '';
   if (rep) {
     const total = rep.important_count + rep.not_important_count;
     if (total > 0) {
-      reputationCtx = `\nHistórico deste remetente: ${rep.important_count} marcado(s) como importante/urgente e ${rep.not_important_count} como baixa prioridade/não importante pelo usuário.`;
+      repCtx = `\nHistórico do remetente: ${rep.important_count}x importante/urgente, ${rep.not_important_count}x ignorado.`;
     }
   }
 
-  const completion = await getOpenAI().chat.completions.create({
-    model: 'gpt-4o-mini',
-    response_format: { type: 'json_object' },
-    messages: [
-      {
-        role: 'system',
-        content: `Você é um classificador de e-mails pessoais. Analise o remetente e assunto e retorne JSON com:
-- category: uma das opções abaixo (string exata)
-- reason: string (máximo 10 palavras explicando em português)
+  const completion = await withRetry(() =>
+    getOpenAI().chat.completions.create({
+      model: 'gpt-4o-mini',
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content: `Classifique este e-mail em uma das 4 categorias. Retorne JSON:
+{"category":"urgente|importante|baixa_prioridade|nao_importante","reason":"motivo em 1 frase PT"}
 
-Categorias (escolha exatamente uma):
-- "urgente": requer ação imediata — alertas de segurança, pagamentos vencidos, problemas de conta, situações de emergência
-- "importante": relevante mas não urgente — bancos, trabalho, confirmações de transação, pessoas conhecidas
-- "baixa_prioridade": informativo, sem ação necessária — atualizações de serviços, confirmações de pedidos, newsletters úteis
-- "nao_importante": irrelevante — promoções, marketing, redes sociais, cupons, notificações genéricas automáticas${reputationCtx}`,
-      },
-      {
-        role: 'user',
-        content: `Remetente: ${sender}\nAssunto: ${subject}`,
-      },
-    ],
-  });
+Categorias:
+- urgente: ação imediata — alertas de segurança, pagamentos vencidos, problemas de conta
+- importante: relevante mas não urgente — bancos, trabalho, pessoas conhecidas
+- baixa_prioridade: informativo — atualizações de serviço, confirmações de pedido, newsletters úteis
+- nao_importante: irrelevante — promoções, marketing, redes sociais
+
+Contexto: ${dayOfWeek}, ${hour}${repCtx}`,
+        },
+        {
+          role: 'user',
+          content: `De: ${sender}\nAssunto: ${subject}`,
+        },
+      ],
+    }),
+  );
 
   const VALID: EmailCategory[] = ['urgente', 'importante', 'baixa_prioridade', 'nao_importante'];
   try {
@@ -138,11 +172,10 @@ Categorias (escolha exatamente uma):
   }
 }
 
-/** Categories that trigger a WhatsApp notification */
 const NOTIFY_CATEGORIES: EmailCategory[] = ['urgente', 'importante'];
 
 // ---------------------------------------------------------------------------
-// Main fetch + score + notify pipeline (Gmail API — HTTPS, no IMAP needed)
+// Main fetch + score pipeline
 // ---------------------------------------------------------------------------
 
 export interface EmailToNotify {
@@ -175,10 +208,8 @@ export async function fetchAndScoreEmails(): Promise<FetchResult> {
   for (const account of accounts) {
     const stateKey = `gmail_last_polled_${account.email}`;
     const lastPolledStr = getPollState(stateKey);
-
-    // On first run, look back 1 hour to catch recent emails without flooding old ones
     const lastPolledMs = lastPolledStr ? parseInt(lastPolledStr, 10) : Date.now() - 60 * 60 * 1000;
-    const afterSecs = Math.floor((lastPolledMs - 120_000) / 1000); // 2 min overlap to avoid gaps
+    const afterSecs = Math.floor((lastPolledMs - 120_000) / 1000);
     setPollState(stateKey, String(Date.now()));
 
     const auth = buildOAuth2Client(account);
@@ -195,7 +226,12 @@ export async function fetchAndScoreEmails(): Promise<FetchResult> {
     } catch (err: any) {
       const msg = `[gmail] Account ${account.email}: ${(err as Error).message} (status=${err?.status ?? err?.code ?? 'unknown'})`;
       console.error(msg);
-      accountErrors.push(msg);
+      if (err?.status === 401 || err?.code === 401) {
+        disableGoogleAccount(account.id);
+        accountErrors.push(`${account.email}: token inválido (conta desativada)`);
+      } else {
+        accountErrors.push(msg);
+      }
       continue;
     }
 
@@ -221,9 +257,7 @@ export async function fetchAndScoreEmails(): Promise<FetchResult> {
         sender = parseSender(get('From')) || 'unknown';
         subject = get('Subject') || '(sem assunto)';
         const rawDate = get('Date');
-        date = rawDate
-          ? new Date(rawDate).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })
-          : '';
+        date = rawDate ? new Date(rawDate).toLocaleString('pt-BR', { timeZone: TZ }) : '';
       } catch (err) {
         console.error(`[gmail] Failed to fetch message ${msgId}:`, (err as Error).message);
         continue;
@@ -251,7 +285,6 @@ export async function fetchAndScoreEmails(): Promise<FetchResult> {
         decisionSource = 'ai';
       }
 
-      // Map category to a numeric score for DB storage
       const categoryScore: Record<EmailCategory, number> = {
         urgente: 1.0,
         importante: 0.75,
@@ -273,7 +306,7 @@ export async function fetchAndScoreEmails(): Promise<FetchResult> {
 }
 
 // ---------------------------------------------------------------------------
-// Format notification message
+// Format notification — grouped when 3+ emails
 // ---------------------------------------------------------------------------
 
 const CATEGORY_LABEL: Record<EmailCategory, string> = {
@@ -288,27 +321,51 @@ export function formatEmailNotification(emails: EmailToNotify[]): string {
 
   const lines = [`📬 *${emails.length} e-mail(s) novo(s):*`, ''];
 
-  for (const [i, e] of emails.entries()) {
-    const idx = i + 1;
-    const srcIcon = e.decisionSource === 'reputation' ? '⭐' : '🤖';
-    lines.push(`*${idx}.* ${CATEGORY_LABEL[e.category]} ${srcIcon}`);
-    lines.push(`   📧 ${e.sender}`);
-    lines.push(`   📌 ${e.subject}`);
-    lines.push(`   🕐 ${e.date}`);
-    if (e.reason) lines.push(`   _${e.reason}_`);
-    lines.push('');
+  if (emails.length >= 3) {
+    // Grouped format
+    const groups: Partial<Record<EmailCategory, EmailToNotify[]>> = {};
+    for (const e of emails) {
+      groups[e.category] = groups[e.category] ?? [];
+      groups[e.category]!.push(e);
+    }
+    const order: EmailCategory[] = ['urgente', 'importante', 'baixa_prioridade', 'nao_importante'];
+    let idx = 1;
+    for (const cat of order) {
+      const group = groups[cat];
+      if (!group?.length) continue;
+      lines.push(`${CATEGORY_LABEL[cat]}:`);
+      for (const e of group) {
+        const srcIcon = e.decisionSource === 'reputation' ? '⭐' : '';
+        lines.push(`  *${idx}.* ${e.sender} — ${e.subject}${srcIcon ? ' ' + srcIcon : ''}`);
+        idx++;
+      }
+      lines.push('');
+    }
+  } else {
+    // Detailed format for 1-2 emails
+    for (const [i, e] of emails.entries()) {
+      const idx = i + 1;
+      const srcIcon = e.decisionSource === 'reputation' ? '⭐' : '🤖';
+      lines.push(`*${idx}.* ${CATEGORY_LABEL[e.category]} ${srcIcon}`);
+      lines.push(`   📧 ${e.sender}`);
+      lines.push(`   📌 ${e.subject}`);
+      lines.push(`   🕐 ${e.date}`);
+      if (e.reason) lines.push(`   _${e.reason}_`);
+      lines.push('');
+    }
   }
 
   if (emails.length === 1) {
     lines.push('_Classifique: *urgente*, *importante*, *baixa prioridade* ou *não importante*_');
   } else {
-    lines.push('_Classifique com o número: *urgente 1*, *importante 2*, *baixa prioridade 3*, *não importante 3*_');
+    lines.push('_Classifique com o número: *urgente 1*, *importante 2*, *não importante 3*_');
   }
+
   return lines.join('\n').trim();
 }
 
 // ---------------------------------------------------------------------------
-// Save notification batch (so feedback commands can reference by index)
+// Persist notification batch
 // ---------------------------------------------------------------------------
 
 export function persistNotificationBatch(phone: string, emails: EmailToNotify[]): void {
@@ -319,7 +376,7 @@ export function persistNotificationBatch(phone: string, emails: EmailToNotify[])
 }
 
 // ---------------------------------------------------------------------------
-// Record user feedback ("importante 1" / "não importante 2")
+// Record user feedback with accuracy tracking
 // ---------------------------------------------------------------------------
 
 export function recordEmailFeedback(
@@ -332,8 +389,15 @@ export function recordEmailFeedback(
     return `⚠️ E-mail #${idx} não encontrado. Use *meus emails* para ver a lista atual.`;
   }
 
+  // Map old ai_score to category for logging
+  const aiCat: EmailCategory =
+    email.ai_score >= 1.0 ? 'urgente' :
+    email.ai_score >= 0.7 ? 'importante' :
+    email.ai_score >= 0.2 ? 'baixa_prioridade' : 'nao_importante';
+
   setEmailFeedback(email.id, feedback);
   updateSenderReputation(email.sender, feedback);
+  logEmailFeedback(phone, email.sender, email.subject, aiCat, feedback);
 
   const FEEDBACK_LABEL: Record<EmailFeedback, string> = {
     urgente: '🚨 Urgente',
@@ -348,9 +412,7 @@ export function recordEmailFeedback(
   const total = rep ? rep.important_count + rep.not_important_count : 1;
   const ratio = rep
     ? Math.round((rep.important_count / total) * 100)
-    : feedback === 'urgente' || feedback === 'importante' || feedback === 'important'
-      ? 100
-      : 0;
+    : (feedback === 'urgente' || feedback === 'importante' || feedback === 'important') ? 100 : 0;
 
   return [
     `${label} — e-mail #${idx} registrado.`,
@@ -359,8 +421,48 @@ export function recordEmailFeedback(
 }
 
 // ---------------------------------------------------------------------------
-// Legacy compat — fetchNewImportantEmails used by /trigger-gmail endpoint
-// and "meus emails" command
+// Email status panel
+// ---------------------------------------------------------------------------
+
+export function getEmailStatusPanel(phone: string): string {
+  const stats = getEmailClassificationStats(phone);
+  const lastPoll = getPollState('gmail_last_polled_default') ?? getPollState('gmail_last_polled_undefined');
+
+  let lastPollStr = 'desconhecido';
+  if (lastPoll) {
+    const ms = Date.now() - parseInt(lastPoll, 10);
+    const mins = Math.floor(ms / 60_000);
+    lastPollStr = mins < 1 ? 'agora mesmo' : mins === 1 ? 'há 1 min' : `há ${mins} min`;
+  }
+
+  const lines = [
+    `📧 *Status do e-mail:*`,
+    `📊 Precisão da IA: ${stats.accuracy}% (${stats.correct}/${stats.total} classificações)`,
+    `🕐 Último check: ${lastPollStr}`,
+  ];
+
+  if (stats.topMistake) {
+    lines.push(`❌ Erro mais comum: _${stats.topMistake}_`);
+  }
+
+  lines.push('', '_Use *meus emails* para verificar novos e-mails._');
+  return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Filter emails by phone preferences before sending notifications
+// ---------------------------------------------------------------------------
+
+export function filterEmailsForPhone(phone: string, emails: EmailToNotify[]): EmailToNotify[] {
+  return emails.filter((e) => {
+    if (isInSilentHours(phone, e.category)) return false;
+    if (!shouldNotifyCategory(phone, e.category)) return false;
+    return true;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Legacy compat
 // ---------------------------------------------------------------------------
 
 export async function fetchNewImportantEmails(): Promise<FetchResult> {

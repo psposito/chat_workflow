@@ -103,13 +103,84 @@ export function initDb(): Database.Database {
       payload     TEXT    NOT NULL,
       created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
     );
+
+    -- User facts extracted from conversations (long-term memory)
+    CREATE TABLE IF NOT EXISTS user_facts (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      phone      TEXT    NOT NULL,
+      fact       TEXT    NOT NULL,
+      category   TEXT    NOT NULL DEFAULT 'general',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      last_used  DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Per-user preferences and settings
+    CREATE TABLE IF NOT EXISTS user_preferences (
+      phone                      TEXT PRIMARY KEY,
+      timezone                   TEXT    NOT NULL DEFAULT 'America/Sao_Paulo',
+      language                   TEXT    NOT NULL DEFAULT 'pt-BR',
+      silent_start               TEXT    NOT NULL DEFAULT '22:00',
+      silent_end                 TEXT    NOT NULL DEFAULT '07:00',
+      email_notify_categories    TEXT    NOT NULL DEFAULT 'urgente,importante',
+      daily_email_limit          INTEGER NOT NULL DEFAULT 20,
+      calendar_reminder_minutes  INTEGER NOT NULL DEFAULT 15,
+      calendar_reminder_enabled  INTEGER NOT NULL DEFAULT 1,
+      briefing_enabled           INTEGER NOT NULL DEFAULT 1,
+      briefing_time              TEXT    NOT NULL DEFAULT '07:30',
+      verbose_mode               INTEGER NOT NULL DEFAULT 0,
+      updated_at                 DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Log of every email classification + user feedback for accuracy tracking
+    CREATE TABLE IF NOT EXISTS email_feedback_log (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      phone         TEXT    NOT NULL,
+      sender        TEXT    NOT NULL,
+      subject       TEXT,
+      ai_category   TEXT    NOT NULL,
+      user_category TEXT    NOT NULL,
+      was_correct   INTEGER NOT NULL,
+      created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- Bot usage metrics per interaction
+    CREATE TABLE IF NOT EXISTS bot_metrics (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      phone         TEXT    NOT NULL,
+      module        TEXT    NOT NULL,
+      action        TEXT    NOT NULL,
+      latency_ms    INTEGER,
+      success       INTEGER NOT NULL DEFAULT 1,
+      error_message TEXT,
+      created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
   `);
 
-  // Migration: add notified column if it doesn't exist yet
-  try {
-    db.exec('ALTER TABLE tasks ADD COLUMN notified INTEGER NOT NULL DEFAULT 0');
-  } catch {
-    // Column already exists — ignore
+  // ---------------------------------------------------------------------------
+  // Migrations on existing tables
+  // ---------------------------------------------------------------------------
+
+  const migrations: [string, string][] = [
+    ['tasks', 'notified INTEGER NOT NULL DEFAULT 0'],
+    ['tasks', 'priority TEXT NOT NULL DEFAULT \'media\''],
+    ['tasks', 'category TEXT NOT NULL DEFAULT \'geral\''],
+    ['tasks', 'completed_at DATETIME DEFAULT NULL'],
+    ['tasks', 'recurrence TEXT DEFAULT NULL'],
+    ['tasks', 'recurrence_end DATE DEFAULT NULL'],
+    ['conversation_memory', 'is_summary INTEGER NOT NULL DEFAULT 0'],
+  ];
+
+  for (const [table, colDef] of migrations) {
+    const colName = colDef.split(' ')[0];
+    const info = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+    if (!info.some((c) => c.name === colName)) {
+      try {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${colDef}`);
+        console.log(`[db] Migration: added ${table}.${colName}`);
+      } catch (e) {
+        console.warn(`[db] Migration skipped (${table}.${colName}):`, (e as Error).message);
+      }
+    }
   }
 
   // Migration: expand gmail_emails.feedback CHECK to 4-category system
@@ -155,6 +226,10 @@ export function getDb(): Database.Database {
 // Tasks
 // ---------------------------------------------------------------------------
 
+export type TaskPriority = 'alta' | 'media' | 'baixa';
+export type TaskCategory = 'trabalho' | 'pessoal' | 'saude' | 'financeiro' | 'geral';
+export type TaskRecurrence = 'daily' | 'weekly' | 'monthly' | 'weekdays';
+
 export interface Task {
   id: number;
   phone: string;
@@ -163,6 +238,11 @@ export interface Task {
   due_date: string | null;
   due_time: string | null;
   status: 'pending' | 'done';
+  priority: TaskPriority;
+  category: TaskCategory;
+  completed_at: string | null;
+  recurrence: TaskRecurrence | null;
+  recurrence_end: string | null;
   notified: 0 | 1;
   created_at: string;
 }
@@ -173,21 +253,30 @@ export function saveTask(
   description: string,
   dueDate?: string,
   dueTime?: string,
+  priority: TaskPriority = 'media',
+  category: TaskCategory = 'geral',
+  recurrence?: TaskRecurrence,
+  recurrenceEnd?: string,
 ): Task {
   const stmt = getDb().prepare(`
-    INSERT INTO tasks (phone, title, description, due_date, due_time)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO tasks (phone, title, description, due_date, due_time, priority, category, recurrence, recurrence_end)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     RETURNING *
   `);
-  return stmt.get(phone, title, description, dueDate ?? null, dueTime ?? null) as Task;
+  return stmt.get(
+    phone, title, description,
+    dueDate ?? null, dueTime ?? null,
+    priority, category,
+    recurrence ?? null, recurrenceEnd ?? null,
+  ) as Task;
 }
 
 export function listPendingTasks(phone: string): Task[] {
   return getDb()
     .prepare(
       `SELECT * FROM tasks
-       WHERE phone = ? AND status = 'pending'
-       ORDER BY due_date ASC, due_time ASC, created_at ASC`,
+       WHERE phone = ? AND status = 'pending' AND completed_at IS NULL
+       ORDER BY due_date ASC NULLS LAST, due_time ASC NULLS LAST, created_at ASC`,
     )
     .all(phone) as Task[];
 }
@@ -196,7 +285,8 @@ export function getTasksDueNow(date: string, time: string): Task[] {
   return getDb()
     .prepare(
       `SELECT * FROM tasks
-       WHERE due_date = ? AND due_time = ? AND status = 'pending' AND notified = 0`,
+       WHERE due_date = ? AND due_time = ? AND status = 'pending'
+         AND completed_at IS NULL AND notified = 0`,
     )
     .all(date, time) as Task[];
 }
@@ -212,20 +302,41 @@ export function deleteTask(phone: string, id: number): boolean {
   return result.changes > 0;
 }
 
+export function completeTask(phone: string, id: number): boolean {
+  const result = getDb()
+    .prepare(`UPDATE tasks SET completed_at = CURRENT_TIMESTAMP, status = 'done' WHERE id = ? AND phone = ? AND completed_at IS NULL`)
+    .run(id, phone);
+  return result.changes > 0;
+}
+
+export function postponeTask(phone: string, id: number, newDate: string, newTime?: string): boolean {
+  const result = getDb()
+    .prepare(`UPDATE tasks SET due_date = ?, due_time = COALESCE(?, due_time), notified = 0 WHERE id = ? AND phone = ?`)
+    .run(newDate, newTime ?? null, id, phone);
+  return result.changes > 0;
+}
+
+export function updateTaskPriority(phone: string, id: number, priority: TaskPriority): boolean {
+  const result = getDb()
+    .prepare(`UPDATE tasks SET priority = ? WHERE id = ? AND phone = ?`)
+    .run(priority, id, phone);
+  return result.changes > 0;
+}
+
 export function deleteAllTasks(phone: string): number {
   const result = getDb()
-    .prepare(`DELETE FROM tasks WHERE phone = ? AND status = 'pending'`)
+    .prepare(`DELETE FROM tasks WHERE phone = ? AND status = 'pending' AND completed_at IS NULL`)
     .run(phone);
   return result.changes as number;
 }
 
 export function listTasksDueToday(): Map<string, Task[]> {
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }); // YYYY-MM-DD
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
   const rows = getDb()
     .prepare(
       `SELECT * FROM tasks
-       WHERE due_date = ? AND status = 'pending'
-       ORDER BY due_time ASC, created_at ASC`,
+       WHERE due_date = ? AND status = 'pending' AND completed_at IS NULL
+       ORDER BY due_time ASC NULLS LAST, created_at ASC`,
     )
     .all(today) as Task[];
 
@@ -238,6 +349,46 @@ export function listTasksDueToday(): Map<string, Task[]> {
   return byPhone;
 }
 
+/** Spawn the next recurrence of a task after completion */
+export function spawnNextRecurrence(task: Task): Task | null {
+  if (!task.recurrence || !task.due_date) return null;
+
+  const current = new Date(`${task.due_date}T12:00:00-03:00`);
+  let next: Date;
+
+  switch (task.recurrence) {
+    case 'daily':
+      next = new Date(current);
+      next.setDate(next.getDate() + 1);
+      break;
+    case 'weekly':
+      next = new Date(current);
+      next.setDate(next.getDate() + 7);
+      break;
+    case 'monthly':
+      next = new Date(current);
+      next.setMonth(next.getMonth() + 1);
+      break;
+    case 'weekdays': {
+      next = new Date(current);
+      do { next.setDate(next.getDate() + 1); } while (next.getDay() === 0 || next.getDay() === 6);
+      break;
+    }
+    default:
+      return null;
+  }
+
+  const nextDate = next.toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+  if (task.recurrence_end && nextDate > task.recurrence_end) return null;
+
+  return saveTask(
+    task.phone, task.title, task.description,
+    nextDate, task.due_time ?? undefined,
+    task.priority, task.category,
+    task.recurrence, task.recurrence_end ?? undefined,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Gmail — legacy notified table (kept for backward compat)
 // ---------------------------------------------------------------------------
@@ -247,7 +398,6 @@ export function isEmailNotified(messageId: string): boolean {
     .prepare(`SELECT 1 FROM gmail_notified WHERE message_id = ?`)
     .get(messageId);
   if (inOld) return true;
-  // Any entry in gmail_emails means the email has been processed (scored) already
   const inNew = getDb()
     .prepare(`SELECT 1 FROM gmail_emails WHERE message_id = ?`)
     .get(messageId);
@@ -265,7 +415,6 @@ export function markEmailNotified(messageId: string): void {
 // ---------------------------------------------------------------------------
 
 export type EmailCategory = 'urgente' | 'importante' | 'baixa_prioridade' | 'nao_importante';
-// Legacy values kept for backward compatibility
 export type EmailFeedback = EmailCategory | 'important' | 'not_important';
 
 export interface GmailEmail {
@@ -349,6 +498,43 @@ export function getEmailByBatchIndex(phone: string, idx: number): GmailEmail | n
     JOIN gmail_notification_batch b ON b.email_id = e.id
     WHERE b.phone = ? AND b.idx = ?
   `).get(phone, idx) as GmailEmail | null;
+}
+
+export function logEmailFeedback(
+  phone: string,
+  sender: string,
+  subject: string | null,
+  aiCategory: string,
+  userCategory: string,
+): void {
+  getDb().prepare(`
+    INSERT INTO email_feedback_log (phone, sender, subject, ai_category, user_category, was_correct)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(phone, sender, subject ?? null, aiCategory, userCategory, aiCategory === userCategory ? 1 : 0);
+}
+
+export function getEmailClassificationStats(phone: string): {
+  total: number;
+  correct: number;
+  accuracy: number;
+  topMistake: string | null;
+} {
+  const total = (getDb().prepare(`SELECT COUNT(*) as c FROM email_feedback_log WHERE phone = ?`).get(phone) as { c: number }).c;
+  if (total === 0) return { total: 0, correct: 0, accuracy: 0, topMistake: null };
+  const correct = (getDb().prepare(`SELECT COUNT(*) as c FROM email_feedback_log WHERE phone = ? AND was_correct = 1`).get(phone) as { c: number }).c;
+
+  const mistake = getDb().prepare(`
+    SELECT ai_category || ' → ' || user_category as pair, COUNT(*) as cnt
+    FROM email_feedback_log WHERE phone = ? AND was_correct = 0
+    GROUP BY pair ORDER BY cnt DESC LIMIT 1
+  `).get(phone) as { pair: string; cnt: number } | undefined;
+
+  return {
+    total,
+    correct,
+    accuracy: Math.round((correct / total) * 100),
+    topMistake: mistake ? `${mistake.pair} (${mistake.cnt}x)` : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -446,11 +632,11 @@ export interface MemoryEntry {
   phone: string;
   role: 'user' | 'assistant';
   content: string;
+  is_summary: 0 | 1;
   created_at: string;
 }
 
-export function getMemory(phone: string, limit = 10): MemoryEntry[] {
-  // Return oldest-first so they can be fed directly into a chat messages array
+export function getMemory(phone: string, limit = 20): MemoryEntry[] {
   return getDb()
     .prepare(
       `SELECT * FROM (
@@ -467,13 +653,47 @@ export function saveMemory(
   phone: string,
   role: 'user' | 'assistant',
   content: string,
+  isSummary = false,
 ): MemoryEntry {
   const stmt = getDb().prepare(`
-    INSERT INTO conversation_memory (phone, role, content)
-    VALUES (?, ?, ?)
+    INSERT INTO conversation_memory (phone, role, content, is_summary)
+    VALUES (?, ?, ?, ?)
     RETURNING *
   `);
-  return stmt.get(phone, role, content) as MemoryEntry;
+  return stmt.get(phone, role, content, isSummary ? 1 : 0) as MemoryEntry;
+}
+
+export function countMemory(phone: string): number {
+  return (getDb()
+    .prepare(`SELECT COUNT(*) as c FROM conversation_memory WHERE phone = ? AND is_summary = 0`)
+    .get(phone) as { c: number }).c;
+}
+
+export function getOldestNonSummaryMessages(phone: string, n: number): MemoryEntry[] {
+  return getDb()
+    .prepare(`SELECT * FROM conversation_memory WHERE phone = ? AND is_summary = 0 ORDER BY id ASC LIMIT ?`)
+    .all(phone, n) as MemoryEntry[];
+}
+
+export function deleteMessagesByIds(ids: number[]): void {
+  if (ids.length === 0) return;
+  const placeholders = ids.map(() => '?').join(',');
+  getDb().prepare(`DELETE FROM conversation_memory WHERE id IN (${placeholders})`).run(...ids);
+}
+
+export function pruneMemory(phone: string, keep = 20): void {
+  getDb()
+    .prepare(
+      `DELETE FROM conversation_memory
+       WHERE phone = ?
+         AND id NOT IN (
+           SELECT id FROM conversation_memory
+           WHERE phone = ?
+           ORDER BY id DESC
+           LIMIT ?
+         )`,
+    )
+    .run(phone, phone, keep);
 }
 
 // ---------------------------------------------------------------------------
@@ -522,20 +742,170 @@ export function clearPendingAction(phone: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Conversation memory
+// User facts (long-term memory extracted from conversations)
 // ---------------------------------------------------------------------------
 
-export function pruneMemory(phone: string, keep = 10): void {
-  getDb()
-    .prepare(
-      `DELETE FROM conversation_memory
-       WHERE phone = ?
-         AND id NOT IN (
-           SELECT id FROM conversation_memory
-           WHERE phone = ?
-           ORDER BY id DESC
-           LIMIT ?
-         )`,
-    )
-    .run(phone, phone, keep);
+export type FactCategory = 'preference' | 'project' | 'person' | 'habit' | 'general';
+
+export interface UserFact {
+  id: number;
+  phone: string;
+  fact: string;
+  category: FactCategory;
+  created_at: string;
+  last_used: string;
+}
+
+export function getUserFacts(phone: string, limit = 20): UserFact[] {
+  return getDb()
+    .prepare(`SELECT * FROM user_facts WHERE phone = ? ORDER BY last_used DESC LIMIT ?`)
+    .all(phone, limit) as UserFact[];
+}
+
+export function saveUserFact(phone: string, fact: string, category: FactCategory): void {
+  // Skip if an almost-identical fact already exists
+  const existing = getDb()
+    .prepare(`SELECT id FROM user_facts WHERE phone = ? AND fact LIKE ?`)
+    .get(phone, `%${fact.slice(0, 30)}%`) as { id: number } | undefined;
+  if (existing) return;
+
+  getDb().prepare(`INSERT INTO user_facts (phone, fact, category) VALUES (?, ?, ?)`).run(phone, fact, category);
+
+  // Cap at 50 facts per phone — remove oldest by last_used
+  const count = (getDb().prepare(`SELECT COUNT(*) as c FROM user_facts WHERE phone = ?`).get(phone) as { c: number }).c;
+  if (count > 50) {
+    const oldest = getDb()
+      .prepare(`SELECT id FROM user_facts WHERE phone = ? ORDER BY last_used ASC LIMIT ?`)
+      .all(phone, count - 50) as { id: number }[];
+    const ids = oldest.map((r) => r.id);
+    if (ids.length) {
+      const ph = ids.map(() => '?').join(',');
+      getDb().prepare(`DELETE FROM user_facts WHERE id IN (${ph})`).run(...ids);
+    }
+  }
+}
+
+export function touchUserFacts(ids: number[]): void {
+  if (ids.length === 0) return;
+  const ph = ids.map(() => '?').join(',');
+  getDb().prepare(`UPDATE user_facts SET last_used = CURRENT_TIMESTAMP WHERE id IN (${ph})`).run(...ids);
+}
+
+// ---------------------------------------------------------------------------
+// User preferences
+// ---------------------------------------------------------------------------
+
+export interface UserPreferences {
+  phone: string;
+  timezone: string;
+  language: string;
+  silent_start: string;
+  silent_end: string;
+  email_notify_categories: string;
+  daily_email_limit: number;
+  calendar_reminder_minutes: number;
+  calendar_reminder_enabled: 0 | 1;
+  briefing_enabled: 0 | 1;
+  briefing_time: string;
+  verbose_mode: 0 | 1;
+  updated_at: string;
+}
+
+const DEFAULT_PREFS: Omit<UserPreferences, 'phone' | 'updated_at'> = {
+  timezone: 'America/Sao_Paulo',
+  language: 'pt-BR',
+  silent_start: '22:00',
+  silent_end: '07:00',
+  email_notify_categories: 'urgente,importante',
+  daily_email_limit: 20,
+  calendar_reminder_minutes: 15,
+  calendar_reminder_enabled: 1,
+  briefing_enabled: 1,
+  briefing_time: '07:30',
+  verbose_mode: 0,
+};
+
+export function getUserPreferences(phone: string): UserPreferences {
+  const row = getDb()
+    .prepare(`SELECT * FROM user_preferences WHERE phone = ?`)
+    .get(phone) as UserPreferences | undefined;
+  if (row) return row;
+  // Return defaults without persisting (lazily created on first set)
+  return { phone, updated_at: new Date().toISOString(), ...DEFAULT_PREFS };
+}
+
+export function setUserPreference<K extends keyof Omit<UserPreferences, 'phone' | 'updated_at'>>(
+  phone: string,
+  key: K,
+  value: UserPreferences[K],
+): void {
+  const current = getUserPreferences(phone);
+  const merged = { ...current, [key]: value };
+  getDb().prepare(`
+    INSERT INTO user_preferences (phone, timezone, language, silent_start, silent_end,
+      email_notify_categories, daily_email_limit, calendar_reminder_minutes,
+      calendar_reminder_enabled, briefing_enabled, briefing_time, verbose_mode, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(phone) DO UPDATE SET ${key} = excluded.${key}, updated_at = CURRENT_TIMESTAMP
+  `).run(
+    phone, merged.timezone, merged.language, merged.silent_start, merged.silent_end,
+    merged.email_notify_categories, merged.daily_email_limit, merged.calendar_reminder_minutes,
+    merged.calendar_reminder_enabled, merged.briefing_enabled, merged.briefing_time, merged.verbose_mode,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Bot metrics
+// ---------------------------------------------------------------------------
+
+export function logMetric(
+  phone: string,
+  module: string,
+  action: string,
+  latencyMs: number | null,
+  success: boolean,
+  errorMessage?: string,
+): void {
+  try {
+    getDb().prepare(`
+      INSERT INTO bot_metrics (phone, module, action, latency_ms, success, error_message)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(phone, module, action, latencyMs, success ? 1 : 0, errorMessage ?? null);
+  } catch {
+    // Metrics must never crash the bot
+  }
+}
+
+export function getMetricStats(phone: string, days = 7): {
+  total: number;
+  successRate: number;
+  avgLatencyMs: number;
+  topModules: { module: string; count: number }[];
+  errors: { message: string; count: number }[];
+} {
+  const since = new Date(Date.now() - days * 86_400_000).toISOString();
+  const total = (getDb().prepare(`SELECT COUNT(*) as c FROM bot_metrics WHERE phone = ? AND created_at >= ?`).get(phone, since) as { c: number }).c;
+  if (total === 0) return { total: 0, successRate: 100, avgLatencyMs: 0, topModules: [], errors: [] };
+
+  const ok = (getDb().prepare(`SELECT COUNT(*) as c FROM bot_metrics WHERE phone = ? AND created_at >= ? AND success = 1`).get(phone, since) as { c: number }).c;
+  const avgRow = getDb().prepare(`SELECT AVG(latency_ms) as a FROM bot_metrics WHERE phone = ? AND created_at >= ? AND latency_ms IS NOT NULL`).get(phone, since) as { a: number | null };
+
+  const topModules = getDb().prepare(`
+    SELECT module, COUNT(*) as count FROM bot_metrics WHERE phone = ? AND created_at >= ?
+    GROUP BY module ORDER BY count DESC LIMIT 5
+  `).all(phone, since) as { module: string; count: number }[];
+
+  const errors = getDb().prepare(`
+    SELECT error_message as message, COUNT(*) as count
+    FROM bot_metrics WHERE phone = ? AND created_at >= ? AND success = 0 AND error_message IS NOT NULL
+    GROUP BY message ORDER BY count DESC LIMIT 3
+  `).all(phone, since) as { message: string; count: number }[];
+
+  return {
+    total,
+    successRate: Math.round((ok / total) * 100),
+    avgLatencyMs: Math.round(avgRow.a ?? 0),
+    topModules,
+    errors,
+  };
 }

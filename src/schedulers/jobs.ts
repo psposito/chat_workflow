@@ -6,6 +6,7 @@ import { fetchNewImportantEmails, formatEmailsForWhatsApp, persistNotificationBa
 import { checkAndSendCalendarReminders } from '../modules/googleCalendar';
 import { notify } from '../notifier';
 import { getConnectedPhones } from '../chatNotifier';
+import { filterEmailsForPhone } from '../modules/gmail';
 
 const TZ = 'America/Sao_Paulo';
 
@@ -159,12 +160,17 @@ async function runGmailPoll(): Promise<void> {
     return;
   }
 
-  const message = formatEmailsForWhatsApp(emails);
   for (const phone of phones) {
+    const filtered = filterEmailsForPhone(phone, emails);
+    if (filtered.length === 0) {
+      console.log(`[jobs] Gmail: all emails filtered out for ${phone} (silent hours or category prefs)`);
+      continue;
+    }
+    const message = formatEmailsForWhatsApp(filtered);
     try {
-      await notify(phone,message);
-      persistNotificationBatch(phone, emails);
-      console.log(`[jobs] Gmail notification sent to ${phone}`);
+      await notify(phone, message);
+      persistNotificationBatch(phone, filtered);
+      console.log(`[jobs] Gmail notification sent to ${phone} (${filtered.length} emails)`);
     } catch (err) {
       console.error(`[jobs] Failed to send Gmail notification to ${phone}:`, (err as Error).message);
     }
@@ -216,12 +222,14 @@ export async function triggerGmailPoll(): Promise<GmailPollResult> {
     return { phones, emailsScanned: scanned, emailsImportant: 0, emailsSent: 0, errors: accountErrors };
   }
 
-  const message = formatEmailsForWhatsApp(emails);
   let emailsSent = 0;
   for (const phone of phones) {
+    const filtered = filterEmailsForPhone(phone, emails);
+    if (filtered.length === 0) continue;
+    const message = formatEmailsForWhatsApp(filtered);
     try {
-      await notify(phone,message);
-      persistNotificationBatch(phone, emails);
+      await notify(phone, message);
+      persistNotificationBatch(phone, filtered);
       emailsSent++;
     } catch (err) {
       errors.push(`Failed to send to ${phone}: ${(err as Error).message}`);

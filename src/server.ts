@@ -40,8 +40,59 @@ app.use(express.urlencoded({ extended: false }));
 // GET /health
 // ---------------------------------------------------------------------------
 
-app.get('/health', (_req: Request, res: Response) => {
-  res.json({ status: 'ok' });
+app.get('/health', async (_req: Request, res: Response) => {
+  const uptimeMs = process.uptime() * 1000;
+  const uptimeHours = Math.round(uptimeMs / 3_600_000 * 10) / 10;
+  const memMb = Math.round(process.memoryUsage().heapUsed / 1_048_576);
+
+  // Google accounts status
+  let googleStatus: { active: number; expired: number } = { active: 0, expired: 0 };
+  try {
+    const accounts = getEnabledGoogleAccounts();
+    const now = new Date();
+    googleStatus.active = accounts.filter(
+      (a) => !a.token_expiry || new Date(a.token_expiry) > now,
+    ).length;
+    googleStatus.expired = accounts.length - googleStatus.active;
+  } catch { /* non-fatal */ }
+
+  // OpenAI check (lightweight)
+  let openaiStatus = 'ok';
+  if (!process.env.OPENAI_API_KEY) openaiStatus = 'not_configured';
+
+  // Twilio check
+  const twilioStatus =
+    process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
+      ? 'ok'
+      : 'not_configured';
+
+  // Last poll timestamps
+  const { getPollState, getDb } = await import('./db/database');
+  let lastGmailPoll: string | null = null;
+  try {
+    const accounts = getEnabledGoogleAccounts();
+    for (const a of accounts) {
+      const v = getPollState(`gmail_last_polled_${a.email}`);
+      if (v && (!lastGmailPoll || parseInt(v) > parseInt(lastGmailPoll))) lastGmailPoll = v;
+    }
+  } catch { /* non-fatal */ }
+
+  let pendingTasksCount = 0;
+  try {
+    pendingTasksCount = (getDb().prepare(`SELECT COUNT(*) as c FROM tasks WHERE status='pending' AND completed_at IS NULL`).get() as { c: number }).c;
+  } catch { /* non-fatal */ }
+
+  res.json({
+    status: 'healthy',
+    uptime_hours: uptimeHours,
+    memory_mb: memMb,
+    database: 'ok',
+    openai: openaiStatus,
+    google_accounts: googleStatus,
+    twilio: twilioStatus,
+    last_gmail_poll: lastGmailPoll ? new Date(parseInt(lastGmailPoll)).toISOString() : null,
+    pending_tasks_count: pendingTasksCount,
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -230,36 +281,63 @@ const CHAT_HTML = `<!DOCTYPE html>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #e5ddd5; height: 100dvh; display: flex; flex-direction: column; }
-  #header { background: #075e54; color: #fff; padding: 12px 16px; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
-  #header h1 { font-size: 17px; font-weight: 600; }
-  #phone-wrap { margin-left: auto; display: flex; align-items: center; gap: 8px; }
-  #phone-wrap label { font-size: 12px; opacity: .8; }
-  #phone-input { background: rgba(255,255,255,.15); border: none; border-radius: 6px; color: #fff; font-size: 13px; padding: 4px 8px; width: 200px; outline: none; }
-  #phone-input::placeholder { color: rgba(255,255,255,.6); }
-  #messages { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 6px; }
-  .bubble { max-width: 72%; padding: 8px 12px; border-radius: 8px; font-size: 14px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+  #header { background: #075e54; color: #fff; padding: 10px 16px; display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+  #header h1 { font-size: 16px; font-weight: 600; white-space: nowrap; }
+  #status-dot { width: 8px; height: 8px; border-radius: 50%; background: #4caf50; flex-shrink: 0; transition: background .3s; }
+  #status-dot.offline { background: #f44336; }
+  #phone-wrap { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+  #phone-wrap label { font-size: 11px; opacity: .8; }
+  #phone-input { background: rgba(255,255,255,.15); border: none; border-radius: 6px; color: #fff; font-size: 12px; padding: 3px 7px; width: 180px; outline: none; }
+  #phone-input::placeholder { color: rgba(255,255,255,.5); }
+  #notif-btn { background: rgba(255,255,255,.15); border: none; border-radius: 6px; color: #fff; font-size: 11px; padding: 3px 8px; cursor: pointer; white-space: nowrap; }
+  #quick-actions { background: #f5f5f5; border-bottom: 1px solid #ddd; padding: 6px 12px; display: flex; gap: 6px; flex-wrap: wrap; flex-shrink: 0; }
+  .qa-btn { background: #fff; border: 1px solid #ddd; border-radius: 16px; padding: 4px 10px; font-size: 12px; cursor: pointer; white-space: nowrap; transition: background .15s; }
+  .qa-btn:hover { background: #e8f5e9; border-color: #a5d6a7; }
+  #messages { flex: 1; overflow-y: auto; padding: 10px 14px; display: flex; flex-direction: column; gap: 5px; }
+  .bubble { max-width: 75%; padding: 7px 11px; border-radius: 8px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
   .bubble.user { background: #dcf8c6; align-self: flex-end; border-bottom-right-radius: 2px; }
-  .bubble.bot { background: #fff; align-self: flex-start; border-bottom-left-radius: 2px; box-shadow: 0 1px 1px rgba(0,0,0,.08); }
+  .bubble.bot { background: #fff; align-self: flex-start; border-bottom-left-radius: 2px; box-shadow: 0 1px 2px rgba(0,0,0,.1); }
+  .bubble.bot b { font-weight: 600; }
+  .bubble.bot em { font-style: italic; color: #555; }
+  .bubble.bot s { text-decoration: line-through; color: #999; }
+  .bubble.bot a { color: #075e54; }
+  .bubble.bot ul { padding-left: 18px; }
+  .bubble.bot code { background: #f5f5f5; padding: 1px 4px; border-radius: 3px; font-size: 13px; }
   .bubble.typing { color: #888; font-style: italic; }
-  #footer { background: #f0f0f0; padding: 8px 12px; display: flex; gap: 8px; flex-shrink: 0; }
-  #msg-input { flex: 1; border: none; border-radius: 20px; padding: 10px 16px; font-size: 15px; outline: none; background: #fff; }
-  #send-btn { background: #075e54; color: #fff; border: none; border-radius: 50%; width: 44px; height: 44px; font-size: 20px; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  #footer { background: #f0f0f0; padding: 6px 10px; display: flex; gap: 7px; flex-shrink: 0; align-items: center; }
+  #msg-input { flex: 1; border: none; border-radius: 20px; padding: 9px 15px; font-size: 15px; outline: none; background: #fff; }
+  #send-btn { background: #075e54; color: #fff; border: none; border-radius: 50%; width: 42px; height: 42px; font-size: 19px; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
   #send-btn:disabled { opacity: .5; cursor: default; }
+  #badge { position: fixed; top: 0; left: 0; }
 </style>
 </head>
 <body>
 <div id="header">
+  <div id="status-dot" title="SSE desconectado"></div>
   <h1>🤖 Bot Test Chat</h1>
+  <button id="notif-btn" onclick="requestNotifPermission()">🔔 Notificações</button>
   <div id="phone-wrap">
     <label>Telefone:</label>
     <input id="phone-input" type="text" value="whatsapp:+5500000000000" placeholder="whatsapp:+55...">
   </div>
 </div>
+
+<div id="quick-actions">
+  <button class="qa-btn" onclick="quickSend('meu dia')">☀️ Meu dia</button>
+  <button class="qa-btn" onclick="quickSend('minha agenda')">📅 Agenda</button>
+  <button class="qa-btn" onclick="quickSend('minhas tarefas')">📋 Tarefas</button>
+  <button class="qa-btn" onclick="quickSend('meus emails')">📧 E-mails</button>
+  <button class="qa-btn" onclick="quickSend('seo')">📡 SEO</button>
+  <button class="qa-btn" onclick="quickSend('ajuda')">❓ Ajuda</button>
+</div>
+
 <div id="messages"></div>
+
 <div id="footer">
   <input id="msg-input" type="text" placeholder="Digite uma mensagem..." autocomplete="off">
   <button id="send-btn">➤</button>
 </div>
+
 <script>
 const TOKEN = '__TOKEN__';
 const SECRET = TOKEN ? new URLSearchParams(TOKEN.slice(1)).get('secret') : null;
@@ -267,13 +345,20 @@ const msgs = document.getElementById('messages');
 const input = document.getElementById('msg-input');
 const btn = document.getElementById('send-btn');
 const phoneInput = document.getElementById('phone-input');
+const statusDot = document.getElementById('status-dot');
+let unreadCount = 0;
 
+// ── Markdown-like formatting ─────────────────────────────────────────────────
 function fmt(text) {
   return text
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-    .replace(/\\*(.*?)\\*/g,'<b>$1</b>')
-    .replace(/_(.*?)_/g,'<em>$1</em>')
-    .replace(/~(.*?)~/g,'<s>$1</s>');
+    .replace(/\`\`\`([\s\S]*?)\`\`\`/g, '<code>$1</code>')
+    .replace(/\*(.*?)\*/g, '<b>$1</b>')
+    .replace(/_(.*?)_/g, '<em>$1</em>')
+    .replace(/~(.*?)~/g, '<s>$1</s>')
+    .replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank">$1</a>')
+    .replace(/^[ \t]*[•\-] (.+)$/gm, '<li>$1</li>')
+    .replace(/(<li>.*<\/li>\n?)+/g, (m) => '<ul>' + m + '</ul>');
 }
 
 function addBubble(text, side, extra) {
@@ -285,8 +370,9 @@ function addBubble(text, side, extra) {
   return d;
 }
 
-async function send() {
-  const msg = input.value.trim();
+// ── Send message ─────────────────────────────────────────────────────────────
+async function send(msg) {
+  msg = (msg ?? input.value).trim();
   if (!msg) return;
   const phone = phoneInput.value.trim() || 'whatsapp:+5500000000000';
   input.value = '';
@@ -308,11 +394,33 @@ async function send() {
   input.focus();
 }
 
-btn.addEventListener('click', send);
+function quickSend(msg) { input.value = msg; send(msg); }
+
+btn.addEventListener('click', () => send());
 input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }});
 input.focus();
 
-// ── SSE: receive push notifications (task/calendar alerts) ──────────────────
+// ── Browser notifications ────────────────────────────────────────────────────
+function requestNotifPermission() {
+  if (!('Notification' in window)) return alert('Este browser não suporta notificações.');
+  Notification.requestPermission().then((p) => {
+    document.getElementById('notif-btn').textContent = p === 'granted' ? '🔔 Ativado' : '🔕 Negado';
+  });
+}
+
+function showBrowserNotif(text) {
+  if (Notification.permission !== 'granted') return;
+  if (document.hasFocus()) return;
+  new Notification('🤖 Bot Alerta', { body: text.slice(0, 120), icon: '' });
+}
+
+function updateBadge() {
+  document.title = unreadCount > 0 ? '(' + unreadCount + ') WhatsApp Bot' : 'Bot Test Chat';
+}
+
+window.addEventListener('focus', () => { unreadCount = 0; updateBadge(); });
+
+// ── SSE ──────────────────────────────────────────────────────────────────────
 let evtSource = null;
 
 function connectSSE() {
@@ -321,19 +429,29 @@ function connectSSE() {
   const qs = new URLSearchParams({ phone });
   if (SECRET) qs.set('secret', SECRET);
   evtSource = new EventSource('/chat/events?' + qs.toString());
+
+  evtSource.onopen = () => {
+    statusDot.className = '';
+    statusDot.title = 'Conectado';
+  };
   evtSource.onmessage = (e) => {
     try {
       const { text } = JSON.parse(e.data);
       addBubble('🔔 ' + text, 'bot');
+      if (!document.hasFocus()) {
+        unreadCount++;
+        updateBadge();
+        showBrowserNotif(text);
+      }
     } catch (_) {}
   };
   evtSource.onerror = () => {
-    // Auto-reconnect is handled by EventSource; no action needed
+    statusDot.className = 'offline';
+    statusDot.title = 'Desconectado — reconectando...';
   };
 }
 
 connectSSE();
-// Reconnect when the phone number is changed
 phoneInput.addEventListener('change', connectSSE);
 </script>
 </body>
